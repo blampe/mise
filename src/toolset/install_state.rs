@@ -22,7 +22,7 @@ fn normalize_version_for_sort(v: &str) -> &str {
         .unwrap_or(v)
 }
 
-type InstallStatePlugins = BTreeMap<String, PluginType>;
+type InstallStatePlugins = BTreeMap<String, (PluginType, Option<PathBuf>)>;
 type InstallStateTools = BTreeMap<String, InstallStateTool>;
 type MutexResult<T> = Result<Arc<T>>;
 
@@ -46,6 +46,40 @@ pub(crate) async fn init() -> Result<()> {
     Ok(())
 }
 
+/// Detect plugin type by inspecting the plugin directory
+pub fn detect_plugin_type(path: &Path) -> Result<PluginType> {
+    // Validate upfront to provide clear error messages before attempting
+    // to inspect plugin marker files.
+    if !path.exists() {
+        return Err(eyre::eyre!(
+            "Plugin path does not exist: {}",
+            display_path(path)
+        ));
+    }
+    if !path.is_dir() {
+        return Err(eyre::eyre!(
+            "Plugin path is not a directory: {}",
+            display_path(path)
+        ));
+    }
+
+    if path.join("metadata.lua").exists() {
+        if has_backend_methods(path) {
+            Ok(PluginType::VfoxBackend)
+        } else {
+            Ok(PluginType::Vfox)
+        }
+    } else if path.join("bin").join("list-all").exists() {
+        Ok(PluginType::Asdf)
+    } else {
+        Err(eyre::eyre!(
+            "Unable to detect plugin type for: {}. \
+             Missing metadata.lua (vfox) or bin/list-all (asdf)",
+            display_path(path)
+        ))
+    }
+}
+
 async fn init_plugins() -> MutexResult<InstallStatePlugins> {
     if let Some(plugins) = INSTALL_STATE_PLUGINS
         .lock()
@@ -64,16 +98,11 @@ async fn init_plugins() -> MutexResult<InstallStatePlugins> {
                 info!("removing banned plugin {d}");
                 let _ = file::remove_all(&path);
                 None
-            } else if path.join("metadata.lua").exists() {
-                if has_backend_methods(&path) {
-                    Some((d, PluginType::VfoxBackend))
-                } else {
-                    Some((d, PluginType::Vfox))
-                }
-            } else if path.join("bin").join("list-all").exists() {
-                Some((d, PluginType::Asdf))
             } else {
-                None
+                match detect_plugin_type(&path) {
+                    eyre::Result::Ok(plugin_type) => Some((d, (plugin_type, None))), // None = not a local plugin
+                    eyre::Result::Err(_) => None,
+                }
             }
         })
         .collect();
@@ -130,7 +159,7 @@ async fn init_tools() -> MutexResult<InstallStateTools> {
         .into_iter()
         .filter(|(_, tool)| !tool.versions.is_empty())
         .collect::<BTreeMap<_, _>>();
-    for (short, pt) in init_plugins().await?.iter() {
+    for (short, (pt, _path)) in init_plugins().await?.iter() {
         let full = match pt {
             PluginType::Asdf => format!("asdf:{short}"),
             PluginType::Vfox => format!("vfox:{short}"),
@@ -152,7 +181,7 @@ async fn init_tools() -> MutexResult<InstallStateTools> {
     Ok(tools)
 }
 
-pub fn list_plugins() -> Arc<BTreeMap<String, PluginType>> {
+pub fn list_plugins() -> Arc<BTreeMap<String, (PluginType, Option<PathBuf>)>> {
     INSTALL_STATE_PLUGINS
         .lock()
         .expect("INSTALL_STATE_PLUGINS lock failed")
@@ -184,7 +213,7 @@ pub fn get_tool_full(short: &str) -> Option<String> {
 }
 
 pub fn get_plugin_type(short: &str) -> Option<PluginType> {
-    list_plugins().get(short).cloned()
+    list_plugins().get(short).map(|(pt, _)| *pt)
 }
 
 pub fn list_tools() -> Arc<BTreeMap<String, InstallStateTool>> {
@@ -219,11 +248,28 @@ pub fn list_versions(short: &str) -> Vec<String> {
 
 pub async fn add_plugin(short: &str, plugin_type: PluginType) -> Result<()> {
     let mut plugins = init_plugins().await?.deref().clone();
-    plugins.insert(short.to_string(), plugin_type);
+    plugins.insert(short.to_string(), (plugin_type, None)); // None = not a local plugin
     *INSTALL_STATE_PLUGINS
         .lock()
         .expect("INSTALL_STATE_PLUGINS lock failed") = Some(Arc::new(plugins));
     Ok(())
+}
+
+pub async fn add_local_plugin(short: &str, path: PathBuf, plugin_type: PluginType) -> Result<()> {
+    let mut plugins = init_plugins().await?.deref().clone();
+    plugins.insert(short.to_string(), (plugin_type, Some(path)));
+    *INSTALL_STATE_PLUGINS
+        .lock()
+        .expect("INSTALL_STATE_PLUGINS lock failed") = Some(Arc::new(plugins));
+    Ok(())
+}
+
+/// Get the path for a plugin, checking for local plugins first, then falling back to the standard plugins directory.
+pub fn get_plugin_path(short: &str) -> PathBuf {
+    list_plugins()
+        .get(short)
+        .and_then(|(_, path)| path.clone())
+        .unwrap_or_else(|| dirs::PLUGINS.join(short.to_kebab_case()))
 }
 
 fn backend_meta_path(short: &str) -> PathBuf {
@@ -347,5 +393,36 @@ mod tests {
 
         // 2.0.35 should be first
         assert_eq!(**sorted_with_norm.first().unwrap(), "2.0.35");
+    }
+
+    #[test]
+    fn test_detect_plugin_type_asdf_and_vfox() {
+        use crate::file::{create_dir_all, remove_all, write};
+        use crate::plugins::PluginType;
+        use std::path::PathBuf;
+
+        // Test ASDF plugin detection
+        let asdf_dir = PathBuf::from("/tmp/test-asdf-plugin");
+        create_dir_all(asdf_dir.join("bin")).unwrap();
+        write(
+            asdf_dir.join("bin").join("list-all"),
+            "#!/bin/bash\necho 1.0.0",
+        )
+        .unwrap();
+
+        let result = super::detect_plugin_type(&asdf_dir).unwrap();
+        assert_eq!(result, PluginType::Asdf);
+
+        remove_all(&asdf_dir).unwrap();
+
+        // Test vfox plugin detection
+        let vfox_dir = PathBuf::from("/tmp/test-vfox-plugin");
+        create_dir_all(&vfox_dir).unwrap();
+        write(vfox_dir.join("metadata.lua"), "return {}").unwrap();
+
+        let result = super::detect_plugin_type(&vfox_dir).unwrap();
+        assert_eq!(result, PluginType::Vfox);
+
+        remove_all(&vfox_dir).unwrap();
     }
 }

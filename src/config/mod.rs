@@ -38,6 +38,7 @@ pub mod tracking;
 use crate::env_diff::EnvMap;
 use crate::hook_env::WatchFilePattern;
 use crate::hooks::Hook;
+use crate::plugins::PluginLocation;
 use crate::plugins::PluginType;
 use crate::tera::BASE_CONTEXT;
 use crate::watch_files::WatchFile;
@@ -51,7 +52,7 @@ pub struct Config {
     pub config_files: ConfigMap,
     pub project_root: Option<PathBuf>,
     pub all_aliases: AliasMap,
-    pub repo_urls: HashMap<String, String>,
+    pub plugins: HashMap<String, PluginLocation>,
     pub vars: IndexMap<String, String>,
     pub tera_ctx: tera::Context,
     pub shorthands: Shorthands,
@@ -140,7 +141,7 @@ impl Config {
             all_aliases: Default::default(),
             aliases: Default::default(),
             project_root: Default::default(),
-            repo_urls: Default::default(),
+            plugins: Default::default(),
             vars: Default::default(),
             vars_loader: None,
             vars_results: OnceCell::new(),
@@ -158,7 +159,7 @@ impl Config {
             all_aliases: config.all_aliases.clone(),
             aliases: config.aliases.clone(),
             project_root: config.project_root.clone(),
-            repo_urls: config.repo_urls.clone(),
+            plugins: config.plugins.clone(),
             vars: config.vars.clone(),
             vars_loader: None,
             vars_results: OnceCell::new(),
@@ -180,7 +181,7 @@ impl Config {
         config.vars = vars;
         config.aliases = load_aliases(&config.config_files)?;
         config.project_root = get_project_root(&config.config_files);
-        config.repo_urls = load_plugins(&config.config_files)?;
+        config.plugins = load_plugins(&config.config_files)?;
         measure!("config::load validate", {
             config.validate()?;
         });
@@ -205,26 +206,46 @@ impl Config {
         time!("load done");
 
         measure!("config::load install_state", {
-            for (plugin, url) in &config.repo_urls {
+            for (plugin, location) in &config.plugins {
                 // check plugin type, fallback to asdf
-                let (mut plugin_type, has_explicit_prefix) = match plugin {
-                    p if p.starts_with("vfox:") => (PluginType::Vfox, true),
-                    p if p.starts_with("vfox-backend:") => (PluginType::VfoxBackend, true),
-                    p if p.starts_with("asdf:") => (PluginType::Asdf, true),
-                    _ => (PluginType::Asdf, false),
-                };
-                // keep backward compatibility for vfox plugins, but only if no explicit prefix
-                if !has_explicit_prefix && url.contains("vfox-") {
-                    plugin_type = PluginType::Vfox;
-                }
-
-                let plugin = plugin
+                let plugin_name = plugin
                     .strip_prefix("vfox:")
                     .or_else(|| plugin.strip_prefix("vfox-backend:"))
                     .or_else(|| plugin.strip_prefix("asdf:"))
                     .unwrap_or(plugin);
 
-                install_state::add_plugin(plugin, plugin_type).await?;
+                match location {
+                    PluginLocation::Remote(url) => {
+                        // check plugin type, fallback to asdf
+                        let (mut plugin_type, has_explicit_prefix) = match plugin.as_str() {
+                            p if p.starts_with("vfox:") => (PluginType::Vfox, true),
+                            p if p.starts_with("vfox-backend:") => (PluginType::VfoxBackend, true),
+                            p if p.starts_with("asdf:") => (PluginType::Asdf, true),
+                            _ => (PluginType::Asdf, false),
+                        };
+                        // keep backward compatibility for vfox plugins, but only if no explicit prefix
+                        if !has_explicit_prefix && url.contains("vfox-") {
+                            plugin_type = PluginType::Vfox;
+                        }
+
+                        install_state::add_plugin(plugin_name, plugin_type).await?;
+                    }
+                    PluginLocation::Local(path) => {
+                        // Detect plugin type with prefix support
+                        let plugin_type = match plugin.as_str() {
+                            p if p.starts_with("vfox:") => PluginType::Vfox,
+                            p if p.starts_with("vfox-backend:") => PluginType::VfoxBackend,
+                            p if p.starts_with("asdf:") => PluginType::Asdf,
+                            _ => {
+                                // Auto-detect based on path contents
+                                install_state::detect_plugin_type(path)?
+                            }
+                        };
+
+                        install_state::add_local_plugin(plugin_name, path.clone(), plugin_type)
+                            .await?;
+                    }
+                }
             }
         });
 
@@ -234,7 +255,7 @@ impl Config {
                 .iter()
                 .filter(|(_, a)| a.backend.is_some())
                 .map(|(s, _)| s)
-                .chain(config.repo_urls.keys())
+                .chain(config.plugins.keys())
             {
                 // we need to remove aliased tools so they get re-added with updated "full" values
                 backend::remove(short);
@@ -326,18 +347,22 @@ impl Config {
             .all_aliases
             .get(plugin_name)
             .and_then(|a| a.backend.clone())
-            .or_else(|| self.repo_urls.get(plugin_name).cloned())
+            .or_else(|| {
+                self.plugins
+                    .get(plugin_name)
+                    .and_then(|l| l.as_remote().map(String::from))
+            })
             .unwrap_or(plugin_name.to_string());
         let plugin_name = plugin_name.strip_prefix("asdf:").unwrap_or(&plugin_name);
         let plugin_name = plugin_name.strip_prefix("vfox:").unwrap_or(plugin_name);
 
         if let Some(url) = self
-            .repo_urls
-            .keys()
-            .find(|k| k.ends_with(&format!(":{plugin_name}")))
-            .and_then(|k| self.repo_urls.get(k))
+            .plugins
+            .iter()
+            .find(|(k, _)| k.ends_with(&format!(":{plugin_name}")))
+            .and_then(|(_, l)| l.as_remote())
         {
-            return Some(url.clone());
+            return Some(url.to_string());
         }
 
         self.shorthands
@@ -1313,14 +1338,19 @@ fn load_aliases(config_files: &ConfigMap) -> Result<AliasMap> {
     Ok(aliases)
 }
 
-fn load_plugins(config_files: &ConfigMap) -> Result<HashMap<String, String>> {
+fn load_plugins(config_files: &ConfigMap) -> Result<HashMap<String, PluginLocation>> {
     let mut plugins = HashMap::new();
     for config_file in config_files.values() {
-        for (plugin, url) in config_file.plugins()? {
-            plugins.insert(plugin.clone(), url.clone());
+        for (plugin, location) in config_file.plugins()? {
+            plugins.insert(plugin, location);
         }
     }
-    trace!("load_plugins: {}", plugins.len());
+    trace!(
+        "load_plugins: {} (remote: {}, local: {})",
+        plugins.len(),
+        plugins.values().filter(|l| l.is_remote()).count(),
+        plugins.values().filter(|l| l.is_local()).count()
+    );
     Ok(plugins)
 }
 

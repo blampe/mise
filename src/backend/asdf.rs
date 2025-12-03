@@ -16,14 +16,13 @@ use crate::plugins::Script::{Download, ExecEnv, Install, ParseIdiomaticFile};
 use crate::plugins::asdf_plugin::AsdfPlugin;
 use crate::plugins::mise_plugin_toml::MisePluginToml;
 use crate::plugins::{PluginType, Script, ScriptManager};
-use crate::toolset::{ToolRequest, ToolVersion, Toolset};
+use crate::toolset::{ToolRequest, ToolVersion, Toolset, install_state};
 use crate::ui::progress_report::SingleReport;
 use crate::{backend::Backend, plugins::PluginEnum, timeout};
 use crate::{dirs, env, file};
 use async_trait::async_trait;
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use console::style;
-use heck::ToKebabCase;
 
 /// This represents a plugin installed to ~/.local/share/mise/plugins
 pub struct AsdfBackend {
@@ -43,7 +42,7 @@ pub struct AsdfBackend {
 impl AsdfBackend {
     pub fn from_arg(ba: BackendArg) -> Self {
         let name = ba.tool_name.clone();
-        let plugin_path = dirs::PLUGINS.join(ba.short.to_kebab_case());
+        let plugin_path = install_state::get_plugin_path(&ba.short);
         let plugin = AsdfPlugin::new(name.clone(), plugin_path.clone());
         let mut toml_path = plugin_path.join("mise.plugin.toml");
         if plugin_path.join("rtx.plugin.toml").exists() {

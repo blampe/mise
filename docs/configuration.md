@@ -175,17 +175,24 @@ See [Tasks](/tasks/).
 
 See [Settings](/configuration/settings) for the full list of settings.
 
-### `[plugins]` - Specify Custom Plugin Repository URLs
+### `[plugins]` - Specify Custom Plugin Repository URLs or Local Paths
 
-Use `[plugins]` to add/modify plugin shortnames. Note that this will only modify
-_new_ plugin installations. Existing plugins can use any URL.
+Use `[plugins]` to add/modify plugin shortnames with either remote URLs or local filesystem paths.
+Note that this will only modify _new_ plugin installations. Existing plugins can use any URL.
 
 ```toml
 [plugins]
+# Remote plugins
 elixir = "https://github.com/my-org/mise-elixir.git"
 node = "https://github.com/my-org/mise-node.git#DEADBEEF" # supports specific gitref
 "vfox-backend:myplugin" = "https://github.com/jdx/vfox-npm"
+
+# Local plugins
+my-plugin = "/absolute/path/to/plugin"
+team-plugin = "./plugins/team-plugin" # relative to mise.toml
 ```
+
+Local plugins are useful for development, testing, or team-specific plugins stored in your repository.
 
 The plugin type prefix (e.g., `asdf:`, `vfox:` or `vfox-backend:`) is optional. If omitted, mise will fall back to
 either using `asdf` or `vfox` if the URL contains `vfox-` in the repo name.

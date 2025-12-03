@@ -17,6 +17,7 @@ use crate::errors::Error::UntrustedConfig;
 use crate::file::display_path;
 use crate::hash::hash_to_str;
 use crate::hooks::Hook;
+use crate::plugins::PluginLocation;
 use crate::redactions::Redactions;
 use crate::task::Task;
 use crate::toolset::{ToolRequest, ToolRequestSet, ToolSource, ToolVersionList, Toolset};
@@ -73,7 +74,7 @@ pub trait ConfigFile: Debug + Send + Sync {
     fn config_root(&self) -> PathBuf {
         config_root::config_root(self.get_path())
     }
-    fn plugins(&self) -> Result<HashMap<String, String>> {
+    fn plugins(&self) -> Result<HashMap<String, PluginLocation>> {
         Ok(Default::default())
     }
     fn env_entries(&self) -> Result<Vec<EnvDirective>> {

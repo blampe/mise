@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+# Create local plugin
+mkdir -p local-test/bin
+cat >local-test/bin/list-all <<'EOF'
+#!/usr/bin/env bash
+echo "1.0.0"
+EOF
+chmod +x local-test/bin/list-all
+
+cat >mise.toml <<EOF
+[plugins]
+local-test = "./local-test"
+EOF
+
+# Test: mise plugin ls shows local plugins
+assert_contains "mise plugin ls" "local-test"
+
+# Test: mise plugin update should not error on local plugins
+mise plugin update local-test
+
+# Test: mise plugin uninstall warns about local plugins
+output=$(mise plugin uninstall local-test 2>&1)
+assert_contains "echo '$output'" "configured as a local plugin"
+assert_contains "echo '$output'" "delete the entry from your mise.toml"
+
+# Plugin should still be listed (not actually uninstalled)
+assert_contains "mise plugin ls" "local-test"
+
+# Cleanup
+rm -rf local-test

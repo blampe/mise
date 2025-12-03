@@ -1,6 +1,7 @@
 use eyre::Result;
 
 use crate::backend::unalias_backend;
+use crate::config::Config;
 use crate::toolset::install_state;
 use crate::ui::multi_progress_report::MultiProgressReport;
 use crate::ui::style;
@@ -40,6 +41,17 @@ impl PluginsUninstall {
     }
 
     async fn uninstall_one(&self, plugin_name: &str, mpr: &MultiProgressReport) -> Result<()> {
+        let config = Config::get().await?;
+        if config
+            .plugins
+            .get(plugin_name)
+            .is_some_and(|l| l.is_local())
+        {
+            warn!("Plugin '{plugin_name}' is configured as a local plugin.");
+            warn!("To remove it, delete the entry from your mise.toml [plugins] section.");
+            return Ok(());
+        }
+
         if let Ok(plugin) = plugins::get(plugin_name) {
             if plugin.is_installed() {
                 let prefix = format!("plugin:{}", style::eblue(&plugin.name()));

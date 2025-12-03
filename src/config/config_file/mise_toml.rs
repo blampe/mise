@@ -22,9 +22,11 @@ use crate::config::config_file::{config_root, toml::deserialize_arr};
 use crate::config::env_directive::{AgeFormat, EnvDirective, EnvDirectiveOptions, RequiredValue};
 use crate::config::settings::SettingsPartial;
 use crate::config::{Alias, AliasMap, Config};
+use crate::dirs;
 use crate::file;
 use crate::file::{create_dir_all, display_path};
 use crate::hooks::{Hook, Hooks};
+use crate::plugins::PluginLocation;
 use crate::redactions::Redactions;
 use crate::registry::REGISTRY;
 use crate::task::Task;
@@ -33,6 +35,21 @@ use crate::toolset::{ToolRequest, ToolRequestSet, ToolSource, ToolVersionOptions
 use crate::watch_files::WatchFile;
 
 use super::{ConfigFileType, min_version::MinVersionSpec};
+
+/// Determines if a string represents a local file path vs a remote URL.
+fn is_local_path(value: &str) -> bool {
+    // Reject URLs
+    if value.contains("://") || value.starts_with("git@") {
+        return false;
+    }
+
+    // Detect paths
+    value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with("~/")
+        || value.starts_with("~\\")
+        || Path::new(value).is_absolute()
+}
 
 #[derive(Default, Deserialize)]
 pub struct MiseToml {
@@ -375,6 +392,48 @@ impl MiseToml {
         })?;
         Ok(output)
     }
+
+    /// Resolve a plugin path relative to the config file directory.
+    fn resolve_plugin_path(&self, path_str: &str) -> eyre::Result<PathBuf> {
+        let path = if let Some(stripped) = path_str
+            .strip_prefix("~/")
+            .or_else(|| path_str.strip_prefix("~\\"))
+        {
+            // Tilde is not automatically expanded by PathBuf.
+            dirs::HOME.join(stripped)
+        } else {
+            let path = PathBuf::from(path_str);
+            if path.is_absolute() {
+                path
+            } else {
+                // Make relative paths relative to the config file's directory, not CWD.
+                self.path
+                    .parent()
+                    .ok_or_else(|| eyre!("Cannot determine config directory"))?
+                    .join(path)
+            }
+        };
+
+        // Canonicalize to ensure we have a valid, absolute path that works reliably
+        // across the codebase and catches nonexistent paths early with clear errors.
+        let canonical = path.canonicalize().wrap_err_with(|| {
+            if !path.exists() {
+                format!("Plugin path does not exist: {}", path.display())
+            } else {
+                format!("Cannot resolve plugin path: {}", path.display())
+            }
+        })?;
+
+        // Ensure the path is a directory, not a file.
+        if !canonical.is_dir() {
+            return Err(eyre!(
+                "Plugin path must be a directory, not a file: {}",
+                canonical.display()
+            ));
+        }
+
+        Ok(canonical)
+    }
 }
 
 impl ConfigFile for MiseToml {
@@ -390,13 +449,20 @@ impl ConfigFile for MiseToml {
         self.min_version.as_ref()
     }
 
-    fn plugins(&self) -> eyre::Result<HashMap<String, String>> {
+    fn plugins(&self) -> eyre::Result<HashMap<String, PluginLocation>> {
         self.plugins
-            .clone()
-            .into_iter()
+            .iter()
             .map(|(k, v)| {
-                let v = self.parse_template(&v)?;
-                Ok((k, v))
+                let v = self.parse_template(v)?;
+
+                let location = if is_local_path(&v) {
+                    let path = self.resolve_plugin_path(&v)?;
+                    PluginLocation::Local(path)
+                } else {
+                    PluginLocation::Remote(v)
+                };
+
+                Ok((k.clone(), location))
             })
             .collect()
     }
@@ -1680,7 +1746,10 @@ mod tests {
     use insta::{assert_debug_snapshot, assert_snapshot};
     use test_log::test;
 
+    use std::path::PathBuf;
+
     use crate::dirs;
+    use crate::file::create_dir_all;
     use crate::test::replace_path;
     use crate::toolset::ToolRequest;
     use crate::{config::Config, dirs::CWD};
@@ -2026,5 +2095,223 @@ mod tests {
 
     fn parse_env(toml: String) -> String {
         parse(toml).env_entries().unwrap().into_iter().join("\n")
+    }
+
+    #[test]
+    fn test_is_local_path() {
+        // Remote URLs - should return false
+        assert!(!is_local_path("https://github.com/user/repo"));
+        assert!(!is_local_path("git@github.com:user/repo.git"));
+
+        // Local paths - should return true
+        assert!(is_local_path("./plugins/my-plugin"));
+        assert!(is_local_path("../other-plugin"));
+        assert!(is_local_path("~/plugins/my-plugin"));
+        assert!(is_local_path("/opt/plugins/custom"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_plugins_local_vs_remote() {
+        let _config = Config::get().await.unwrap();
+        let test_dir = CWD.as_ref().unwrap();
+
+        // Create local plugin directory
+        let local_plugin_dir = test_dir.join("local-plugin");
+        create_dir_all(local_plugin_dir.join("bin")).unwrap();
+        file::write(
+            local_plugin_dir.join("bin").join("list-all"),
+            "#!/bin/bash\necho 1.0.0",
+        )
+        .unwrap();
+
+        let p = test_dir.join(".test.mise.toml");
+        file::write(
+            &p,
+            formatdoc! {r#"
+                [plugins]
+                remote-plugin = "https://github.com/user/plugin"
+                local-plugin = "./local-plugin"
+            "#},
+        )
+        .unwrap();
+
+        let cf = MiseToml::from_file(&p).unwrap();
+
+        // plugins() should return both remote and local
+        let plugins = cf.plugins().unwrap();
+        assert_eq!(plugins.len(), 2);
+
+        // Check remote plugin
+        assert!(plugins.contains_key("remote-plugin"));
+        let remote = plugins.get("remote-plugin").unwrap();
+        assert!(remote.is_remote());
+        assert_eq!(remote.as_remote(), Some("https://github.com/user/plugin"));
+
+        // Check local plugin
+        assert!(plugins.contains_key("local-plugin"));
+        let local = plugins.get("local-plugin").unwrap();
+        assert!(local.is_local());
+        assert!(local.as_local().unwrap().ends_with("local-plugin"));
+
+        file::remove_all(&local_plugin_dir).unwrap();
+        file::remove_file(&p).unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_resolve_plugin_path_relative() {
+        let _config = Config::get().await.unwrap();
+        let test_dir = CWD.as_ref().unwrap();
+
+        let plugin_dir = test_dir.join("plugins").join("local-plugin");
+        create_dir_all(plugin_dir.join("bin")).unwrap();
+        file::write(
+            plugin_dir.join("bin").join("list-all"),
+            "#!/bin/bash\necho 1.0.0",
+        )
+        .unwrap();
+
+        let config_path = test_dir.join(".test.mise.toml");
+        file::write(
+            &config_path,
+            formatdoc! {r#"
+                [plugins]
+                local-plugin = "./plugins/local-plugin"
+            "#},
+        )
+        .unwrap();
+
+        let cf = MiseToml::from_file(&config_path).unwrap();
+        let resolved = cf.resolve_plugin_path("./plugins/local-plugin").unwrap();
+
+        assert!(resolved.is_absolute());
+        assert!(resolved.ends_with("plugins/local-plugin"));
+        assert!(resolved.exists());
+
+        file::remove_all(test_dir.join("plugins")).unwrap();
+        file::remove_file(&config_path).unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_resolve_plugin_path_home_expansion() {
+        let _config = Config::get().await.unwrap();
+        let p = CWD.as_ref().unwrap().join(".test.mise.toml");
+
+        let plugin_dir = dirs::HOME.join(".mise-test-plugins").join("home-plugin");
+        create_dir_all(plugin_dir.join("bin")).unwrap();
+        file::write(
+            plugin_dir.join("bin").join("list-all"),
+            "#!/bin/bash\necho 1.0.0",
+        )
+        .unwrap();
+
+        file::write(
+            &p,
+            formatdoc! {r#"
+                [plugins]
+                home-plugin = "~/.mise-test-plugins/home-plugin"
+            "#},
+        )
+        .unwrap();
+
+        let cf = MiseToml::from_file(&p).unwrap();
+        let resolved = cf
+            .resolve_plugin_path("~/.mise-test-plugins/home-plugin")
+            .unwrap();
+
+        assert!(resolved.starts_with(*dirs::HOME));
+        assert!(resolved.ends_with(".mise-test-plugins/home-plugin"));
+
+        file::remove_all(dirs::HOME.join(".mise-test-plugins")).unwrap();
+        file::remove_file(&p).unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_resolve_plugin_path_absolute() {
+        let _config = Config::get().await.unwrap();
+
+        let plugin_dir = PathBuf::from("/tmp/mise-test-absolute-plugin");
+        create_dir_all(plugin_dir.join("bin")).unwrap();
+        file::write(
+            plugin_dir.join("bin").join("list-all"),
+            "#!/bin/bash\necho 1.0.0",
+        )
+        .unwrap();
+
+        let p = PathBuf::from("/tmp/.test.mise.toml");
+        file::write(
+            &p,
+            formatdoc! {r#"
+                [plugins]
+                abs-plugin = "/tmp/mise-test-absolute-plugin"
+            "#},
+        )
+        .unwrap();
+
+        let cf = MiseToml::from_file(&p).unwrap();
+        let resolved = cf
+            .resolve_plugin_path("/tmp/mise-test-absolute-plugin")
+            .unwrap();
+
+        assert_eq!(resolved, plugin_dir.canonicalize().unwrap());
+
+        file::remove_all(&plugin_dir).unwrap();
+        file::remove_file(&p).unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_resolve_plugin_path_nonexistent() {
+        let _config = Config::get().await.unwrap();
+        let p = CWD.as_ref().unwrap().join(".test.mise.toml");
+
+        file::write(
+            &p,
+            formatdoc! {r#"
+                [plugins]
+                missing = "./does-not-exist"
+            "#},
+        )
+        .unwrap();
+
+        let cf = MiseToml::from_file(&p).unwrap();
+        let result = cf.resolve_plugin_path("./does-not-exist");
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
+
+        file::remove_file(&p).unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_resolve_plugin_path_is_file_not_dir() {
+        let _config = Config::get().await.unwrap();
+        let test_dir = CWD.as_ref().unwrap();
+
+        let file_path = test_dir.join("plugin-file.txt");
+        file::write(&file_path, "not a directory").unwrap();
+
+        let p = test_dir.join(".test.mise.toml");
+        file::write(
+            &p,
+            formatdoc! {r#"
+                [plugins]
+                bad-plugin = "./plugin-file.txt"
+            "#},
+        )
+        .unwrap();
+
+        let cf = MiseToml::from_file(&p).unwrap();
+        let result = cf.resolve_plugin_path("./plugin-file.txt");
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not a file"));
+
+        file::remove_file(&file_path).unwrap();
+        file::remove_file(&p).unwrap();
     }
 }

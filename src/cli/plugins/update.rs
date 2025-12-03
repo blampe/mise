@@ -4,7 +4,7 @@ use console::style;
 use eyre::{Result, WrapErr, eyre};
 use tokio::{sync::Semaphore, task::JoinSet};
 
-use crate::config::Settings;
+use crate::config::{Config, Settings};
 use crate::plugins;
 use crate::toolset::install_state;
 use crate::ui::multi_progress_report::MultiProgressReport;
@@ -27,6 +27,7 @@ pub struct Update {
 
 impl Update {
     pub async fn run(self) -> Result<()> {
+        let config = Config::get().await?;
         let plugins: Vec<_> = match self.plugin {
             Some(plugins) => plugins
                 .into_iter()
@@ -40,6 +41,19 @@ impl Update {
                 .map(|p| (p.clone(), None))
                 .collect::<Vec<_>>(),
         };
+
+        // Filter out local plugins since we can't update them.
+        let plugins: Vec<_> = plugins
+            .into_iter()
+            .filter(|(p, _)| {
+                if config.plugins.get(p.as_str()).is_some_and(|l| l.is_local()) {
+                    info!("Skipping local plugin: {p}");
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
 
         let settings = Settings::try_get()?;
         let mut jset: JoinSet<Result<()>> = JoinSet::new();

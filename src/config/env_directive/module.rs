@@ -1,7 +1,7 @@
 use crate::Result;
 use crate::config::env_directive::EnvResults;
-use crate::dirs;
 use crate::plugins::vfox_plugin::VfoxPlugin;
+use crate::toolset::install_state;
 use heck::ToKebabCase;
 use std::path::PathBuf;
 use toml::Value;
@@ -14,7 +14,7 @@ impl EnvResults {
         value: &Value,
         redact: bool,
     ) -> Result<()> {
-        let path = dirs::PLUGINS.join(name.to_kebab_case());
+        let path = install_state::get_plugin_path(&name.to_kebab_case());
         let plugin = VfoxPlugin::new(name, path);
         if let Some(env) = plugin.mise_env(value).await? {
             for (k, v) in env {

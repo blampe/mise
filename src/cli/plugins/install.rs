@@ -133,6 +133,12 @@ impl PluginsInstall {
         name: String,
         git_url: Option<String>,
     ) -> Result<()> {
+        // Local plugins are already installed.
+        if config.plugins.get(&name).is_some_and(|l| l.is_local()) {
+            warn!("Plugin '{name}' is configured as a local plugin. Skipping installation.");
+            return Ok(());
+        }
+
         let path = dirs::PLUGINS.join(name.to_kebab_case());
         let plugin = AsdfPlugin::new(name.clone(), path);
         if let Some(url) = git_url {

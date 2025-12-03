@@ -196,7 +196,11 @@ impl BackendArg {
             {
                 return full;
             }
-            if let Some(url) = Config::get_().repo_urls.get(short) {
+            if let Some(url) = Config::get_()
+                .plugins
+                .get(short)
+                .and_then(|l| l.as_remote())
+            {
                 return format!("asdf:{url}");
             }
 

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+
+# Test 1: Relative path (./)
+mkdir -p plugins/rel-plugin/bin
+cat >plugins/rel-plugin/bin/list-all <<'EOF'
+#!/usr/bin/env bash
+echo "1.0.0"
+EOF
+chmod +x plugins/rel-plugin/bin/list-all
+
+cat >mise.toml <<EOF
+[plugins]
+rel-plugin = "./plugins/rel-plugin"
+EOF
+
+assert_contains "mise plugin ls" "rel-plugin"
+
+# Test 2: Home path (~/)
+mkdir -p "$HOME/.local/mise-plugins/home-plugin/bin"
+cat >"$HOME/.local/mise-plugins/home-plugin/bin/list-all" <<'EOF'
+#!/usr/bin/env bash
+echo "1.0.0"
+EOF
+chmod +x "$HOME/.local/mise-plugins/home-plugin/bin/list-all"
+
+cat >mise.toml <<EOF
+[plugins]
+rel-plugin = "./plugins/rel-plugin"
+home-plugin = "~/.local/mise-plugins/home-plugin"
+EOF
+
+assert_contains "mise plugin ls" "home-plugin"
+
+# Cleanup
+rm -rf plugins "$HOME/.local/mise-plugins"

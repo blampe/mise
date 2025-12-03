@@ -20,7 +20,7 @@ use crate::env_diff::EnvMap;
 use crate::install_context::InstallContext;
 use crate::plugins::Plugin;
 use crate::plugins::vfox_plugin::VfoxPlugin;
-use crate::toolset::{ToolVersion, Toolset};
+use crate::toolset::{ToolVersion, Toolset, install_state};
 use crate::ui::multi_progress_report::MultiProgressReport;
 
 #[derive(Debug)]
@@ -204,7 +204,7 @@ impl VfoxBackend {
             None => ba.short.to_kebab_case(),
         };
 
-        let plugin_path = dirs::PLUGINS.join(&pathname);
+        let plugin_path = install_state::get_plugin_path(&pathname);
         let mut plugin = VfoxPlugin::new(pathname.clone(), plugin_path.clone());
         plugin.full = Some(ba.full());
         let plugin = Arc::new(plugin);

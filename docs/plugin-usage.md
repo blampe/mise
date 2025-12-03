@@ -137,11 +137,16 @@ Plugins can be configured in your `mise.toml` file:
 
 ```toml
 [plugins]
+# Remote git plugin
 vfox-npm = "https://github.com/jdx/vfox-npm"
+
+# Local filesystem plugin
+my-plugin = "./plugins/my-plugin"
 
 [tools]
 "vfox-npm:prettier" = "latest"
 "vfox-npm:eslint" = "8.0.0"
+"my-plugin:tool" = "1.0.0"
 ```
 
 ## Finding Plugins

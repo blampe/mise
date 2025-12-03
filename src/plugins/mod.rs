@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::errors::Error::PluginNotInstalled;
 use crate::git::Git;
 use crate::plugins::asdf_plugin::AsdfPlugin;
@@ -5,14 +6,12 @@ use crate::plugins::vfox_plugin::VfoxPlugin;
 use crate::toolset::install_state;
 use crate::ui::multi_progress_report::MultiProgressReport;
 use crate::ui::progress_report::SingleReport;
-use crate::{config::Config, dirs};
 use async_trait::async_trait;
 use clap::Command;
 use eyre::{Result, eyre};
-use heck::ToKebabCase;
 use regex::Regex;
 pub use script_manager::{Script, ScriptManager};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock as Lazy;
 use std::vec;
 use std::{
@@ -31,6 +30,43 @@ pub enum PluginType {
     Asdf,
     Vfox,
     VfoxBackend,
+}
+
+/// Represents where a plugin comes from (remote URL or local filesystem path)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginLocation {
+    /// Remote plugin specified by URL
+    Remote(String),
+    /// Local plugin specified by filesystem path
+    Local(PathBuf),
+}
+
+impl PluginLocation {
+    /// Returns true if this is a local plugin
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local(_))
+    }
+
+    /// Returns true if this is a remote plugin
+    pub fn is_remote(&self) -> bool {
+        matches!(self, Self::Remote(_))
+    }
+
+    /// Returns the URL if this is a remote plugin
+    pub fn as_remote(&self) -> Option<&str> {
+        match self {
+            Self::Remote(url) => Some(url.as_str()),
+            Self::Local(_) => None,
+        }
+    }
+
+    /// Returns the path if this is a local plugin
+    pub fn as_local(&self) -> Option<&Path> {
+        match self {
+            Self::Local(path) => Some(path.as_path()),
+            Self::Remote(_) => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -180,8 +216,8 @@ impl PluginType {
         }
     }
 
-    pub fn plugin(&self, short: String) -> PluginEnum {
-        let path = dirs::PLUGINS.join(short.to_kebab_case());
+    pub fn plugin(&self, short: String, custom_path: Option<PathBuf>) -> PluginEnum {
+        let path = custom_path.unwrap_or_else(|| install_state::get_plugin_path(&short));
         match self {
             PluginType::Asdf => PluginEnum::Asdf(Arc::new(AsdfPlugin::new(short, path))),
             PluginType::Vfox => PluginEnum::Vfox(Arc::new(VfoxPlugin::new(short, path))),
@@ -205,7 +241,7 @@ pub fn get(short: &str) -> Result<PluginEnum> {
     // For plugin:tool format, look up the plugin by just the plugin name
     let plugin_lookup_key = if short.contains(':') {
         // Check if the part before the colon is a plugin name
-        if let Some(_plugin_type) = install_state::list_plugins().get(name) {
+        if install_state::list_plugins().get(name).is_some() {
             name
         } else {
             short
@@ -214,13 +250,15 @@ pub fn get(short: &str) -> Result<PluginEnum> {
         short
     };
 
-    let plugin_type =
-        if let Some(plugin_type) = install_state::list_plugins().get(plugin_lookup_key) {
-            *plugin_type
+    // Get plugin info including optional custom path
+    let (plugin_type, custom_path) =
+        if let Some((plugin_type, path)) = install_state::list_plugins().get(plugin_lookup_key) {
+            (*plugin_type, path.clone())
         } else {
-            PluginType::from_full(full)?
+            (PluginType::from_full(full)?, None)
         };
-    Ok(plugin_type.plugin(name.to_string()))
+
+    Ok(plugin_type.plugin(name.to_string(), custom_path))
 }
 
 #[allow(unused_variables)]
@@ -400,5 +438,50 @@ mod tests {
             PluginSource::Git { .. } => {}
             _ => panic!("Expected a git plugin"),
         }
+    }
+
+    #[test]
+    fn test_plugin_location_remote() {
+        let location = PluginLocation::Remote("https://github.com/user/plugin.git".to_string());
+        assert!(location.is_remote());
+        assert!(!location.is_local());
+        assert_eq!(
+            location.as_remote(),
+            Some("https://github.com/user/plugin.git")
+        );
+        assert_eq!(location.as_local(), None);
+    }
+
+    #[test]
+    fn test_plugin_location_local() {
+        let path = PathBuf::from("/path/to/plugin");
+        let location = PluginLocation::Local(path.clone());
+        assert!(location.is_local());
+        assert!(!location.is_remote());
+        assert_eq!(location.as_remote(), None);
+        assert_eq!(location.as_local(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn test_plugin_location_equality() {
+        let remote1 = PluginLocation::Remote("https://github.com/user/plugin.git".to_string());
+        let remote2 = PluginLocation::Remote("https://github.com/user/plugin.git".to_string());
+        let remote3 = PluginLocation::Remote("https://github.com/other/plugin.git".to_string());
+        let local1 = PluginLocation::Local(PathBuf::from("/path/to/plugin"));
+        let local2 = PluginLocation::Local(PathBuf::from("/path/to/plugin"));
+        let local3 = PluginLocation::Local(PathBuf::from("/other/path"));
+
+        assert_eq!(remote1, remote2);
+        assert_ne!(remote1, remote3);
+        assert_eq!(local1, local2);
+        assert_ne!(local1, local3);
+        assert_ne!(remote1, local1);
+    }
+
+    #[test]
+    fn test_plugin_location_clone() {
+        let location = PluginLocation::Remote("https://github.com/user/plugin.git".to_string());
+        let cloned = location.clone();
+        assert_eq!(location, cloned);
     }
 }
