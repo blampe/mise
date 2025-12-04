@@ -259,6 +259,28 @@ impl Plugin for AsdfPlugin {
             if self.is_installed() {
                 return Ok(());
             }
+
+            // Check for broken symlinks
+            if self.plugin_path.is_symlink() {
+                return Err(eyre!(
+                    "Plugin {} is a broken symlink: {}",
+                    self.name,
+                    display_path(&self.plugin_path)
+                ));
+            }
+
+            // Detect local plugins: if path is NOT in dirs::PLUGINS, it's a local plugin
+            // Local plugins configured in mise.toml should already exist
+            let is_standard_plugin_path = self.plugin_path.starts_with(&*dirs::PLUGINS);
+            if !is_standard_plugin_path {
+                return Err(eyre!(
+                    "Local plugin path does not exist: {}\n\
+                     Local plugins must exist on disk before use.\n\
+                     Hint: Check your mise.toml [plugins] configuration.",
+                    display_path(&self.plugin_path)
+                ));
+            }
+
             if !settings.yes && self.repo_url.lock().unwrap().is_none() {
                 let url = self.get_repo_url(config).unwrap_or_default();
                 if !registry::is_trusted_plugin(self.name(), &url) {
@@ -461,4 +483,85 @@ fn build_script_man(name: &str, plugin_path: &Path) -> ScriptManager {
         .with_env("GITHUB_TOKEN", token)
         // asdf plugins often use GITHUB_API_TOKEN as the env var for GitHub API token
         .with_env("GITHUB_API_TOKEN", token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::ui::multi_progress_report::MultiProgressReport;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_ensure_installed_local_plugin() {
+        // Setup: Create a minimal local asdf plugin structure
+        let temp = TempDir::new().unwrap();
+        let plugin_dir = temp.path().join("local-asdf-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        fs::create_dir_all(plugin_dir.join("bin")).unwrap();
+        fs::write(plugin_dir.join("bin/list-all"), "#!/bin/bash\necho 1.0.0").unwrap();
+
+        // Create AsdfPlugin pointing to local path
+        let plugin = AsdfPlugin::new("test-plugin".to_string(), plugin_dir.clone());
+
+        // Create config
+        let config = Config::get().await.unwrap();
+        let mpr = MultiProgressReport::get();
+
+        // Test: ensure_installed should NOT try to clone
+        // This should succeed without network access
+        let result = plugin.ensure_installed(&config, &mpr, false, false).await;
+
+        // Verify: should succeed since plugin dir already exists
+        assert!(result.is_ok());
+        assert!(plugin.is_installed());
+    }
+
+    #[tokio::test]
+    async fn test_ensure_installed_local_plugin_missing() {
+        // Setup: Create path but don't create the actual directory
+        let temp = TempDir::new().unwrap();
+        let plugin_dir = temp.path().join("nonexistent-plugin");
+
+        let plugin = AsdfPlugin::new("test-plugin".to_string(), plugin_dir.clone());
+        let config = Config::get().await.unwrap();
+        let mpr = MultiProgressReport::get();
+
+        // Test: ensure_installed with missing local path should fail with clear error
+        let result = plugin.ensure_installed(&config, &mpr, false, false).await;
+
+        // Verify: should fail because path doesn't exist and it's local (no URL to clone)
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Local plugin path does not exist"),
+            "Expected error about local plugin path, got: {err_msg}"
+        );
+        assert!(!plugin.is_installed());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_ensure_installed_symlink_plugin() {
+        // Setup: Create actual plugin and symlink to it
+        let temp = TempDir::new().unwrap();
+        let real_plugin = temp.path().join("real-plugin");
+        let symlink_path = temp.path().join("symlink-plugin");
+
+        fs::create_dir_all(&real_plugin).unwrap();
+        fs::create_dir_all(real_plugin.join("bin")).unwrap();
+        fs::write(real_plugin.join("bin/list-all"), "#!/bin/bash\necho 1.0.0").unwrap();
+
+        std::os::unix::fs::symlink(&real_plugin, &symlink_path).unwrap();
+
+        let plugin = AsdfPlugin::new("test-plugin".to_string(), symlink_path.clone());
+        let config = Config::get().await.unwrap();
+        let mpr = MultiProgressReport::get();
+
+        // Test: symlinked plugins should not be cloned
+        let result = plugin.ensure_installed(&config, &mpr, false, false).await;
+        assert!(result.is_ok());
+        assert!(plugin.is_installed());
+    }
 }

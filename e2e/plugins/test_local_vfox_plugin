@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+
+# Create a minimal vfox plugin locally
+mkdir -p local-vfox-plugin/hooks
+
+cat >local-vfox-plugin/metadata.lua <<'EOF'
+PLUGIN = {}
+PLUGIN.name = "local-vfox-plugin"
+PLUGIN.version = "0.1.0"
+PLUGIN.description = "Local test vfox plugin"
+EOF
+
+cat >local-vfox-plugin/hooks/available.lua <<'EOF'
+function PLUGIN:Available(ctx)
+    return {
+        {version = "1.0.0"},
+        {version = "2.0.0"},
+        {version = "3.0.0"}
+    }
+end
+EOF
+
+cat >local-vfox-plugin/hooks/pre_install.lua <<'EOF'
+function PLUGIN:PreInstall(ctx)
+    return {
+        version = ctx.version
+    }
+end
+EOF
+
+cat >local-vfox-plugin/hooks/post_install.lua <<'EOF'
+function PLUGIN:PostInstall(ctx)
+    local install_path = ctx.path
+    os.execute("mkdir -p " .. install_path .. "/bin")
+    local file = io.open(install_path .. "/bin/local-vfox-tool", "w")
+    if file then
+        file:write("#!/usr/bin/env bash\n")
+        file:write("echo 'local-vfox-tool version " .. ctx.version .. "'\n")
+        file:close()
+        os.execute("chmod +x " .. install_path .. "/bin/local-vfox-tool")
+    end
+end
+EOF
+
+# Configure mise to use local vfox plugin
+cat >mise.toml <<EOF
+[plugins]
+local-vfox-plugin = "./local-vfox-plugin"
+
+[tools]
+"vfox:local-vfox-plugin" = "2.0.0"
+EOF
+
+# Test: plugin appears in plugin ls
+assert_contains "mise plugin ls" "local-vfox-plugin"
+
+# Test: can list versions from local vfox plugin
+assert_contains "mise ls-remote vfox:local-vfox-plugin" "2.0.0"
+
+# Test: can install tool from local vfox plugin
+mise install vfox:local-vfox-plugin@2.0.0
+assert_contains "mise ls --installed" "local-vfox-plugin"
+
+# Test: can execute tool
+assert_contains "mise x -- local-vfox-tool" "local-vfox-tool version 2.0.0"
+
+# Cleanup
+rm -rf local-vfox-plugin

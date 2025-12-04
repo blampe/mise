@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 
 # Create a minimal ASDF plugin locally
-mkdir -p local-plugin/bin
-cat >local-plugin/bin/list-all <<'EOF'
+mkdir -p local-asdf-plugin/bin
+cat >local-asdf-plugin/bin/list-all <<'EOF'
 #!/usr/bin/env bash
 echo "1.0.0 2.0.0 3.0.0"
 EOF
-chmod +x local-plugin/bin/list-all
+chmod +x local-asdf-plugin/bin/list-all
 
-cat >local-plugin/bin/install <<'EOF'
+cat >local-asdf-plugin/bin/install <<'EOF'
 #!/usr/bin/env bash
 echo "Installing version $ASDF_INSTALL_VERSION"
 mkdir -p "$ASDF_INSTALL_PATH/bin"
@@ -18,29 +18,29 @@ echo "local-tool version $ASDF_INSTALL_VERSION"
 TOOL
 chmod +x "$ASDF_INSTALL_PATH/bin/local-tool"
 EOF
-chmod +x local-plugin/bin/install
+chmod +x local-asdf-plugin/bin/install
 
 # Configure mise to use local plugin
 cat >mise.toml <<EOF
 [plugins]
-local-plugin = "./local-plugin"
+local-asdf-plugin = "./local-plugin"
 
 [tools]
-local-plugin = "2.0.0"
+local-asdf-plugin = "2.0.0"
 EOF
 
 # Test: plugin appears in plugin ls
-assert_contains "mise plugin ls" "local-plugin"
+assert_contains "mise plugin ls" "local-asdf-plugin"
 
 # Test: can list versions from local plugin
-assert_contains "mise ls-remote local-plugin" "2.0.0"
+assert_contains "mise ls-remote local-asdf-plugin" "2.0.0"
 
 # Test: can install tool from local plugin
-mise install local-plugin@2.0.0
-assert_contains "mise ls --installed" "local-plugin"
+mise install local-asdf-plugin@2.0.0
+assert_contains "mise ls --installed" "local-asdf-plugin"
 
 # Test: can execute tool
 assert_contains "mise x -- local-tool" "local-tool version 2.0.0"
 
 # Cleanup
-rm -rf local-plugin
+rm -rf local-asdf-plugin

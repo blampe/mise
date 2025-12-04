@@ -204,8 +204,9 @@ impl VfoxBackend {
             None => ba.short.to_kebab_case(),
         };
 
-        let plugin_path = install_state::get_plugin_path(&pathname);
-        let mut plugin = VfoxPlugin::new(pathname.clone(), plugin_path.clone());
+        // Get the plugin path and the actual plugin name (which may differ from pathname for local plugins)
+        let (plugin_name, plugin_path) = install_state::get_plugin_path_and_name(&pathname);
+        let mut plugin = VfoxPlugin::new(plugin_name, plugin_path.clone());
         plugin.full = Some(ba.full());
         let plugin = Arc::new(plugin);
 

@@ -264,12 +264,32 @@ pub async fn add_local_plugin(short: &str, path: PathBuf, plugin_type: PluginTyp
     Ok(())
 }
 
+/// Normalize a plugin name by stripping type prefixes (vfox:, asdf:, etc.)
+fn normalize_plugin_name(name: &str) -> &str {
+    name.strip_prefix("vfox:")
+        .or_else(|| name.strip_prefix("vfox-backend:"))
+        .or_else(|| name.strip_prefix("asdf:"))
+        .unwrap_or(name)
+}
+
+/// Get the path for a plugin, checking for local plugins first, then falling back to the standard plugins directory.
+/// Returns (plugin_name, plugin_path) where plugin_name is the normalized name.
+pub fn get_plugin_path_and_name(short: &str) -> (String, PathBuf) {
+    // Normalize the plugin name for consistent lookup
+    let normalized_name = normalize_plugin_name(short);
+
+    // Single lookup with normalized name
+    if let Some((_, Some(path))) = list_plugins().get(normalized_name) {
+        return (normalized_name.to_string(), path.clone());
+    }
+
+    // Fall back to standard plugins directory
+    (short.to_string(), dirs::PLUGINS.join(short.to_kebab_case()))
+}
+
 /// Get the path for a plugin, checking for local plugins first, then falling back to the standard plugins directory.
 pub fn get_plugin_path(short: &str) -> PathBuf {
-    list_plugins()
-        .get(short)
-        .and_then(|(_, path)| path.clone())
-        .unwrap_or_else(|| dirs::PLUGINS.join(short.to_kebab_case()))
+    get_plugin_path_and_name(short).1
 }
 
 fn backend_meta_path(short: &str) -> PathBuf {

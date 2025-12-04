@@ -192,7 +192,7 @@ my-plugin = "/absolute/path/to/plugin"
 team-plugin = "./plugins/team-plugin" # relative to mise.toml
 ```
 
-Local plugins are useful for development, testing, or team-specific plugins stored in your repository.
+Local plugins are useful for distributing and versioning plugin logic as part of your repository.
 
 The plugin type prefix (e.g., `asdf:`, `vfox:` or `vfox-backend:`) is optional. If omitted, mise will fall back to
 either using `asdf` or `vfox` if the URL contains `vfox-` in the repo name.

@@ -42,8 +42,9 @@ pub struct AsdfBackend {
 impl AsdfBackend {
     pub fn from_arg(ba: BackendArg) -> Self {
         let name = ba.tool_name.clone();
-        let plugin_path = install_state::get_plugin_path(&ba.short);
-        let plugin = AsdfPlugin::new(name.clone(), plugin_path.clone());
+        // Get the plugin path and actual plugin name (which may differ from ba.short for local plugins)
+        let (plugin_name, plugin_path) = install_state::get_plugin_path_and_name(&ba.short);
+        let plugin = AsdfPlugin::new(plugin_name, plugin_path.clone());
         let mut toml_path = plugin_path.join("mise.plugin.toml");
         if plugin_path.join("rtx.plugin.toml").exists() {
             toml_path = plugin_path.join("rtx.plugin.toml");

@@ -235,30 +235,32 @@ pub static VERSION_REGEX: Lazy<regex::Regex> = Lazy::new(|| {
         .unwrap()
 });
 
+/// Normalize a plugin name by stripping type prefixes (vfox:, asdf:, etc.)
+/// This ensures consistent plugin registration and lookup.
+fn normalize_plugin_name(name: &str) -> &str {
+    name.strip_prefix("vfox:")
+        .or_else(|| name.strip_prefix("vfox-backend:"))
+        .or_else(|| name.strip_prefix("asdf:"))
+        .unwrap_or(name)
+}
+
 pub fn get(short: &str) -> Result<PluginEnum> {
     let (name, full) = short.split_once(':').unwrap_or((short, short));
 
-    // For plugin:tool format, look up the plugin by just the plugin name
-    let plugin_lookup_key = if short.contains(':') {
-        // Check if the part before the colon is a plugin name
-        if install_state::list_plugins().get(name).is_some() {
-            name
-        } else {
-            short
-        }
+    // Normalize the plugin name for lookup (strip type prefixes)
+    let normalized_name = normalize_plugin_name(short);
+
+    // Single lookup with normalized name
+    let plugins = install_state::list_plugins();
+    let (plugin_type, custom_path, plugin_name) = if let Some((plugin_type, path)) = plugins.get(normalized_name) {
+        // Found with normalized name
+        (*plugin_type, path.clone(), normalized_name.to_string())
     } else {
-        short
+        // Not found - create new plugin from type
+        (PluginType::from_full(full)?, None, name.to_string())
     };
 
-    // Get plugin info including optional custom path
-    let (plugin_type, custom_path) =
-        if let Some((plugin_type, path)) = install_state::list_plugins().get(plugin_lookup_key) {
-            (*plugin_type, path.clone())
-        } else {
-            (PluginType::from_full(full)?, None)
-        };
-
-    Ok(plugin_type.plugin(name.to_string(), custom_path))
+    Ok(plugin_type.plugin(plugin_name, custom_path))
 }
 
 #[allow(unused_variables)]
