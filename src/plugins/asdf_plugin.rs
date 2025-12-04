@@ -271,7 +271,7 @@ impl Plugin for AsdfPlugin {
 
             // Detect local plugins: if path is NOT in dirs::PLUGINS, it's a local plugin
             // Local plugins configured in mise.toml should already exist
-            let is_standard_plugin_path = self.plugin_path.starts_with(&*dirs::PLUGINS);
+            let is_standard_plugin_path = self.plugin_path.starts_with(*dirs::PLUGINS);
             if !is_standard_plugin_path {
                 return Err(eyre!(
                     "Local plugin path does not exist: {}\n\

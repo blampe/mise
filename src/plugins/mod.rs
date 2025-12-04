@@ -252,13 +252,14 @@ pub fn get(short: &str) -> Result<PluginEnum> {
 
     // Single lookup with normalized name
     let plugins = install_state::list_plugins();
-    let (plugin_type, custom_path, plugin_name) = if let Some((plugin_type, path)) = plugins.get(normalized_name) {
-        // Found with normalized name
-        (*plugin_type, path.clone(), normalized_name.to_string())
-    } else {
-        // Not found - create new plugin from type
-        (PluginType::from_full(full)?, None, name.to_string())
-    };
+    let (plugin_type, custom_path, plugin_name) =
+        if let Some((plugin_type, path)) = plugins.get(normalized_name) {
+            // Found with normalized name
+            (*plugin_type, path.clone(), normalized_name.to_string())
+        } else {
+            // Not found - create new plugin from type
+            (PluginType::from_full(full)?, None, name.to_string())
+        };
 
     Ok(plugin_type.plugin(plugin_name, custom_path))
 }
