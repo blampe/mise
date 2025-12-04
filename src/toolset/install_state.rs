@@ -257,7 +257,7 @@ pub async fn add_plugin(short: &str, plugin_type: PluginType) -> Result<()> {
 
 pub async fn add_local_plugin(short: &str, path: PathBuf, plugin_type: PluginType) -> Result<()> {
     let mut plugins = init_plugins().await?.deref().clone();
-    plugins.insert(short.to_string(), (plugin_type, Some(path)));
+    plugins.insert(short.to_string(), (plugin_type, Some(path.clone())));
     *INSTALL_STATE_PLUGINS
         .lock()
         .expect("INSTALL_STATE_PLUGINS lock failed") = Some(Arc::new(plugins));
@@ -265,7 +265,7 @@ pub async fn add_local_plugin(short: &str, path: PathBuf, plugin_type: PluginTyp
 }
 
 /// Normalize a plugin name by stripping type prefixes (vfox:, asdf:, etc.)
-fn normalize_plugin_name(name: &str) -> &str {
+pub fn normalize_plugin_name(name: &str) -> &str {
     name.strip_prefix("vfox:")
         .or_else(|| name.strip_prefix("vfox-backend:"))
         .or_else(|| name.strip_prefix("asdf:"))

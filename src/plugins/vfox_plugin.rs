@@ -82,7 +82,16 @@ impl VfoxPlugin {
 
     pub fn vfox(&self) -> (Vfox, mpsc::Receiver<String>) {
         let mut vfox = Vfox::new();
-        vfox.plugin_dir = dirs::PLUGINS.to_path_buf();
+        // For local plugins (outside dirs::PLUGINS), use the actual plugin path's parent
+        // For standard plugins, use dirs::PLUGINS
+        vfox.plugin_dir = if self.plugin_path.starts_with(*dirs::PLUGINS) {
+            dirs::PLUGINS.to_path_buf()
+        } else {
+            self.plugin_path
+                .parent()
+                .unwrap_or(&self.plugin_path)
+                .to_path_buf()
+        };
         vfox.cache_dir = dirs::CACHE.to_path_buf();
         vfox.download_dir = dirs::DOWNLOADS.to_path_buf();
         vfox.install_dir = dirs::INSTALLS.to_path_buf();

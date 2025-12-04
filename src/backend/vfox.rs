@@ -201,11 +201,25 @@ impl VfoxBackend {
     pub fn from_arg(ba: BackendArg, backend_plugin_name: Option<String>) -> Self {
         let pathname = match &backend_plugin_name {
             Some(plugin_name) => plugin_name.clone(),
-            None => ba.short.to_kebab_case(),
+            // Normalize first to strip type prefixes, then kebab-case
+            None => install_state::normalize_plugin_name(&ba.short).to_kebab_case(),
         };
 
         // Get the plugin path and the actual plugin name (which may differ from pathname for local plugins)
         let (plugin_name, plugin_path) = install_state::get_plugin_path_and_name(&pathname);
+
+        // For local plugins, use the actual directory name as pathname
+        // For standard plugins, use the normalized/kebab-cased name
+        let pathname = if plugin_path.starts_with(&*dirs::PLUGINS) {
+            pathname
+        } else {
+            plugin_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&pathname)
+                .to_string()
+        };
+
         let mut plugin = VfoxPlugin::new(plugin_name, plugin_path.clone());
         plugin.full = Some(ba.full());
         let plugin = Arc::new(plugin);
