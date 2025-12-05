@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 
 # Create a minimal vfox plugin locally
-# Plugin name and tool name are DIFFERENT to catch lookup bugs
+# Plugin name and tool name can be DIFFERENT for vfox plugins
 # Plugin directory: my-vfox-plugin
-# Plugin name: my-vfox-plugin
-# Tool provided: vfox:demo-tool (binary: demo-tool)
+# Plugin name (in config): my-vfox-plugin
+# Tool reference (in config): vfox:my-vfox-plugin
+# Tool name (in metadata.lua): demo-tool
+# Binary provided: demo-tool
 mkdir -p my-vfox-plugin/hooks
 
 cat >my-vfox-plugin/metadata.lua <<'EOF'
@@ -59,25 +61,26 @@ EOF
 
 # Configure mise to use local vfox plugin
 # Register plugin "my-vfox-plugin" from local directory
+# Tool reference uses plugin name, but metadata.lua defines the actual tool name
 cat >mise.toml <<EOF
 [plugins]
 my-vfox-plugin = "./my-vfox-plugin"
 
 [tools]
-"vfox:demo-tool" = "2.0.0"
+"vfox:my-vfox-plugin" = "2.0.0"
 EOF
 
 # Test: plugin appears in plugin ls
 assert_contains "mise plugin ls" "my-vfox-plugin"
 
 # Test: can list versions from local vfox plugin
-assert_contains "mise ls-remote vfox:demo-tool" "2.0.0"
+assert_contains "mise ls-remote vfox:my-vfox-plugin" "2.0.0"
 
 # Test: can install tool from local vfox plugin
-mise install vfox:demo-tool@2.0.0
-assert_contains "mise ls --installed" "demo-tool"
+mise install vfox:my-vfox-plugin@2.0.0
+assert_contains "mise ls --installed" "my-vfox-plugin"
 
-# Test: can execute tool
+# Test: can execute binary (metadata.lua defines the tool name as "demo-tool")
 assert_contains "mise x -- demo-tool" "demo-tool version 2.0.0"
 
 # Cleanup
