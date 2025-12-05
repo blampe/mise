@@ -48,7 +48,29 @@ impl AsdfBackend {
 
         // Simple lookup - plugin is already resolved
         let plugin_info = install_state::get_plugin_info(normalized).unwrap_or_else(|| {
-            // Fallback: use standard path for unregistered plugins
+            // Fallback: check Config for local plugin definitions
+            if crate::config::is_loaded() {
+                let config = crate::config::Config::get_();
+                if let Some(location) = config.get_plugin_location(normalized) {
+                    match location {
+                        crate::plugins::PluginLocation::Local(path) => {
+                            // Detect plugin type from local path
+                            let plugin_type = install_state::detect_plugin_type(&path)
+                                .unwrap_or(PluginType::Asdf);
+                            return install_state::PluginInfo {
+                                name: normalized.to_string(),
+                                plugin_type,
+                                path: path.clone(),
+                            };
+                        }
+                        crate::plugins::PluginLocation::Remote(_) => {
+                            // Remote plugins use standard path
+                        }
+                    }
+                }
+            }
+
+            // Final fallback: use standard path for unregistered plugins
             install_state::PluginInfo {
                 name: normalized.to_string(),
                 plugin_type: PluginType::Asdf,
