@@ -1,5 +1,6 @@
 use dashmap::DashMap;
 use eyre::{Context, Result, bail, eyre};
+use heck::ToKebabCase;
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 pub use settings::Settings;
@@ -40,6 +41,7 @@ use crate::hook_env::WatchFilePattern;
 use crate::hooks::Hook;
 use crate::plugins::PluginLocation;
 use crate::plugins::PluginType;
+use crate::plugins::names::normalize_plugin_name;
 use crate::tera::BASE_CONTEXT;
 use crate::watch_files::WatchFile;
 use crate::wildcard::Wildcard;
@@ -228,7 +230,12 @@ impl Config {
                             plugin_type = PluginType::Vfox;
                         }
 
-                        install_state::add_plugin(plugin_name, plugin_type).await?;
+                        install_state::add_plugin(install_state::PluginInfo {
+                            name: plugin_name.to_string(),
+                            plugin_type,
+                            path: dirs::PLUGINS.join(plugin_name.to_kebab_case()),
+                        })
+                        .await?;
                     }
                     PluginLocation::Local(path) => {
                         // Detect plugin type with prefix support
@@ -242,8 +249,12 @@ impl Config {
                             }
                         };
 
-                        install_state::add_local_plugin(plugin_name, path.clone(), plugin_type)
-                            .await?;
+                        install_state::add_plugin(install_state::PluginInfo {
+                            name: plugin_name.to_string(),
+                            plugin_type,
+                            path: path.clone(),
+                        })
+                        .await?;
                     }
                 }
             }
@@ -258,11 +269,9 @@ impl Config {
                 .chain(config.plugins.keys())
             {
                 // we need to remove aliased tools so they get re-added with updated "full" values
-                backend::remove(short);
-                // Backend keys include type prefix (e.g. "vfox:hello") but config.plugins keys are normalized ("hello")
-                // Try removing with common prefixes to ensure backends with stale paths get recreated
-                backend::remove(&format!("vfox:{}", short));
-                backend::remove(&format!("asdf:{}", short));
+                // backend cache uses normalized keys, so just remove by short name
+                let normalized = normalize_plugin_name(short);
+                backend::remove(normalized);
             }
         });
 

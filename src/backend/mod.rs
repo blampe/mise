@@ -138,13 +138,16 @@ pub fn list() -> BackendList {
 }
 
 pub fn get(ba: &BackendArg) -> Option<ABackend> {
+    // Normalize upfront - cache uses normalized keys consistently
+    let normalized = plugins::names::normalize_plugin_name(&ba.short);
+
     let mut tools = TOOLS.lock().unwrap();
     let tools_ = tools.as_ref().unwrap();
-    if let Some(backend) = tools_.get(&ba.short) {
+    if let Some(backend) = tools_.get(normalized) {
         Some(backend.clone())
     } else if let Some(backend) = arg_to_backend(ba.clone()) {
         let mut tools_ = tools_.deref().clone();
-        tools_.insert(ba.short.clone(), backend.clone());
+        tools_.insert(normalized.to_string(), backend.clone());
         *tools = Some(Arc::new(tools_));
         Some(backend)
     } else {

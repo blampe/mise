@@ -1,4 +1,8 @@
-use crate::{env, plugins::PluginEnum, timeout};
+use crate::{
+    env,
+    plugins::{PluginEnum, PluginType},
+    timeout,
+};
 use async_trait::async_trait;
 use eyre::WrapErr;
 use heck::ToKebabCase;
@@ -19,6 +23,7 @@ use crate::dirs;
 use crate::env_diff::EnvMap;
 use crate::install_context::InstallContext;
 use crate::plugins::Plugin;
+use crate::plugins::names::normalize_plugin_name;
 use crate::plugins::vfox_plugin::VfoxPlugin;
 use crate::toolset::{ToolVersion, Toolset, install_state};
 use crate::ui::multi_progress_report::MultiProgressReport;
@@ -199,55 +204,34 @@ impl VfoxBackend {
             .ok_or_else(|| eyre::eyre!("VfoxBackend requires a tool name (plugin:tool format)"))
     }
 
-    /// Get the tool name to use for install directory operations.
-    /// For local plugins, this uses the normalized ba.short to match the install directory name.
-    /// For remote plugins, this uses the pathname which matches the plugin directory name.
-    fn install_tool_name(&self) -> &str {
-        if !self.plugin.plugin_path.starts_with(*dirs::PLUGINS) {
-            // Local plugin - use normalized ba.short to match install directory
-            install_state::normalize_plugin_name(&self.ba.short)
-        } else {
-            // Remote plugin - use pathname
-            &self.pathname
-        }
-    }
-
     pub fn from_arg(ba: BackendArg, backend_plugin_name: Option<String>) -> Self {
-        // Normalize the plugin name for consistent lookup
-        let normalized = install_state::normalize_plugin_name(&ba.short);
+        let normalized = normalize_plugin_name(&ba.short);
 
+        // Determine pathname for vfox SDK lookups
         let pathname = match &backend_plugin_name {
             Some(plugin_name) => plugin_name.clone(),
             None => normalized.to_kebab_case(),
         };
 
-        // First check Config for plugin definitions (like the remote plugin commit does)
-        let (plugin_name, plugin_path) = if crate::config::is_loaded() {
-            let config = crate::config::Config::get_();
-            if let Some(location) = config.get_plugin_location(normalized) {
-                match location {
-                    crate::plugins::PluginLocation::Local(path) => {
-                        // For local plugins, return normalized name and local path
-                        (normalized.to_string(), path.clone())
-                    }
-                    crate::plugins::PluginLocation::Remote(_) => {
-                        // Remote plugins use standard path
-                        install_state::get_plugin_path_and_name(&pathname)
-                    }
-                }
-            } else {
-                // Not in config, fall back to install_state
-                install_state::get_plugin_path_and_name(&pathname)
+        // Simple lookup - plugin is already resolved
+        let plugin_info = install_state::get_plugin_info(normalized).unwrap_or_else(|| {
+            // Fallback: use standard path for unregistered plugins
+            install_state::PluginInfo {
+                name: normalized.to_string(),
+                plugin_type: if backend_plugin_name.is_some() {
+                    PluginType::VfoxBackend
+                } else {
+                    PluginType::Vfox
+                },
+                path: dirs::PLUGINS.join(pathname.to_kebab_case()),
             }
-        } else {
-            // Config not loaded yet, fall back to install_state
-            install_state::get_plugin_path_and_name(&pathname)
-        };
+        });
 
-        // For local plugins, pathname should be the plugin directory name for finding hooks
-        // This is different from the install directory name
-        let pathname = if !plugin_path.starts_with(*dirs::PLUGINS) {
-            plugin_path
+        // For local plugins, pathname should be the directory name for finding hooks
+        // For remote plugins, use the normalized kebab-case name
+        let pathname = if plugin_info.is_local() {
+            plugin_info
+                .path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(&pathname)
@@ -256,7 +240,7 @@ impl VfoxBackend {
             pathname
         };
 
-        let mut plugin = VfoxPlugin::new(plugin_name, plugin_path.clone());
+        let mut plugin = VfoxPlugin::new(plugin_info.name.clone(), plugin_info.path.clone());
         plugin.full = Some(ba.full());
         let plugin = Arc::new(plugin);
 
@@ -317,7 +301,7 @@ impl VfoxBackend {
                     use std::collections::BTreeMap as StdBTreeMap;
                     use vfox::hooks::env_keys::EnvKeysContext;
                     let sdk_info = vfox::sdk_info::SdkInfo::new(
-                        self.install_tool_name().to_string(),
+                        self.plugin.name.clone(),
                         tv.version.clone(),
                         tv.install_path(),
                     );

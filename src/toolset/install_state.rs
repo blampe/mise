@@ -3,6 +3,7 @@ use crate::cli::args::BackendArg;
 use crate::file::display_path;
 use crate::git::Git;
 use crate::plugins::PluginType;
+use crate::plugins::names::normalize_plugin_name;
 use crate::{dirs, file, runtime_symlinks};
 use eyre::{Ok, Result};
 use heck::ToKebabCase;
@@ -22,7 +23,27 @@ fn normalize_version_for_sort(v: &str) -> &str {
         .unwrap_or(v)
 }
 
-type InstallStatePlugins = BTreeMap<String, (PluginType, Option<PathBuf>)>;
+/// Complete information about an installed or registered plugin.
+/// This represents a fully resolved plugin with normalized name, type, and path.
+#[derive(Debug, Clone)]
+pub struct PluginInfo {
+    /// Normalized plugin name (no type prefixes)
+    pub name: String,
+    /// Plugin type (Asdf, Vfox, or VfoxBackend)
+    pub plugin_type: PluginType,
+    /// Absolute path to the plugin directory
+    pub path: PathBuf,
+}
+
+impl PluginInfo {
+    /// Returns true if this is a local plugin (outside dirs::PLUGINS).
+    /// This is a derived property based on the path.
+    pub fn is_local(&self) -> bool {
+        !self.path.starts_with(*dirs::PLUGINS)
+    }
+}
+
+type InstallStatePlugins = BTreeMap<String, PluginInfo>;
 type InstallStateTools = BTreeMap<String, InstallStateTool>;
 type MutexResult<T> = Result<Arc<T>>;
 
@@ -100,7 +121,14 @@ async fn init_plugins() -> MutexResult<InstallStatePlugins> {
                 None
             } else {
                 match detect_plugin_type(&path) {
-                    eyre::Result::Ok(plugin_type) => Some((d, (plugin_type, None))), // None = not a local plugin
+                    eyre::Result::Ok(plugin_type) => Some((
+                        d.clone(),
+                        PluginInfo {
+                            name: d,
+                            plugin_type,
+                            path,
+                        },
+                    )),
                     eyre::Result::Err(_) => None,
                 }
             }
@@ -159,8 +187,8 @@ async fn init_tools() -> MutexResult<InstallStateTools> {
         .into_iter()
         .filter(|(_, tool)| !tool.versions.is_empty())
         .collect::<BTreeMap<_, _>>();
-    for (short, (pt, _path)) in init_plugins().await?.iter() {
-        let full = match pt {
+    for (short, plugin_info) in init_plugins().await?.iter() {
+        let full = match plugin_info.plugin_type {
             PluginType::Asdf => format!("asdf:{short}"),
             PluginType::Vfox => format!("vfox:{short}"),
             PluginType::VfoxBackend => short.clone(),
@@ -181,7 +209,7 @@ async fn init_tools() -> MutexResult<InstallStateTools> {
     Ok(tools)
 }
 
-pub fn list_plugins() -> Arc<BTreeMap<String, (PluginType, Option<PathBuf>)>> {
+pub fn list_plugins() -> Arc<BTreeMap<String, PluginInfo>> {
     INSTALL_STATE_PLUGINS
         .lock()
         .expect("INSTALL_STATE_PLUGINS lock failed")
@@ -212,8 +240,12 @@ pub fn get_tool_full(short: &str) -> Option<String> {
     list_tools().get(short).and_then(|t| t.full.clone())
 }
 
+pub fn get_plugin_info(short: &str) -> Option<PluginInfo> {
+    list_plugins().get(short).cloned()
+}
+
 pub fn get_plugin_type(short: &str) -> Option<PluginType> {
-    list_plugins().get(short).map(|(pt, _)| *pt)
+    list_plugins().get(short).map(|info| info.plugin_type)
 }
 
 pub fn list_tools() -> Arc<BTreeMap<String, InstallStateTool>> {
@@ -246,30 +278,13 @@ pub fn list_versions(short: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub async fn add_plugin(short: &str, plugin_type: PluginType) -> Result<()> {
+pub async fn add_plugin(info: PluginInfo) -> Result<()> {
     let mut plugins = init_plugins().await?.deref().clone();
-    plugins.insert(short.to_string(), (plugin_type, None)); // None = not a local plugin
+    plugins.insert(info.name.clone(), info);
     *INSTALL_STATE_PLUGINS
         .lock()
         .expect("INSTALL_STATE_PLUGINS lock failed") = Some(Arc::new(plugins));
     Ok(())
-}
-
-pub async fn add_local_plugin(short: &str, path: PathBuf, plugin_type: PluginType) -> Result<()> {
-    let mut plugins = init_plugins().await?.deref().clone();
-    plugins.insert(short.to_string(), (plugin_type, Some(path.clone())));
-    *INSTALL_STATE_PLUGINS
-        .lock()
-        .expect("INSTALL_STATE_PLUGINS lock failed") = Some(Arc::new(plugins));
-    Ok(())
-}
-
-/// Normalize a plugin name by stripping type prefixes (vfox:, asdf:, etc.)
-pub fn normalize_plugin_name(name: &str) -> &str {
-    name.strip_prefix("vfox:")
-        .or_else(|| name.strip_prefix("vfox-backend:"))
-        .or_else(|| name.strip_prefix("asdf:"))
-        .unwrap_or(name)
 }
 
 /// Get the path for a plugin, checking for local plugins first, then falling back to the standard plugins directory.
@@ -279,8 +294,8 @@ pub fn get_plugin_path_and_name(short: &str) -> (String, PathBuf) {
     let normalized_name = normalize_plugin_name(short);
 
     // Single lookup with normalized name
-    if let Some((_, Some(path))) = list_plugins().get(normalized_name) {
-        return (normalized_name.to_string(), path.clone());
+    if let Some(info) = list_plugins().get(normalized_name) {
+        return (info.name.clone(), info.path.clone());
     }
 
     // Fall back to standard plugins directory

@@ -22,6 +22,7 @@ use std::{
 pub mod asdf_plugin;
 pub mod core;
 pub mod mise_plugin_toml;
+pub mod names;
 pub mod script_manager;
 pub mod vfox_plugin;
 
@@ -235,31 +236,21 @@ pub static VERSION_REGEX: Lazy<regex::Regex> = Lazy::new(|| {
         .unwrap()
 });
 
-/// Normalize a plugin name by stripping type prefixes (vfox:, asdf:, etc.)
-/// This ensures consistent plugin registration and lookup.
-fn normalize_plugin_name(name: &str) -> &str {
-    name.strip_prefix("vfox:")
-        .or_else(|| name.strip_prefix("vfox-backend:"))
-        .or_else(|| name.strip_prefix("asdf:"))
-        .unwrap_or(name)
-}
-
 pub fn get(short: &str) -> Result<PluginEnum> {
     let (name, full) = short.split_once(':').unwrap_or((short, short));
 
     // Normalize the plugin name for lookup (strip type prefixes)
-    let normalized_name = normalize_plugin_name(short);
+    let normalized_name = names::normalize_plugin_name(short);
 
     // Single lookup with normalized name
     let plugins = install_state::list_plugins();
-    let (plugin_type, custom_path, plugin_name) =
-        if let Some((plugin_type, path)) = plugins.get(normalized_name) {
-            // Found with normalized name
-            (*plugin_type, path.clone(), normalized_name.to_string())
-        } else {
-            // Not found - create new plugin from type
-            (PluginType::from_full(full)?, None, name.to_string())
-        };
+    let (plugin_type, custom_path, plugin_name) = if let Some(info) = plugins.get(normalized_name) {
+        // Found with normalized name
+        (info.plugin_type, Some(info.path.clone()), info.name.clone())
+    } else {
+        // Not found - create new plugin from type
+        (PluginType::from_full(full)?, None, name.to_string())
+    };
 
     Ok(plugin_type.plugin(plugin_name, custom_path))
 }

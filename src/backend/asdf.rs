@@ -15,6 +15,7 @@ use crate::install_context::InstallContext;
 use crate::plugins::Script::{Download, ExecEnv, Install, ParseIdiomaticFile};
 use crate::plugins::asdf_plugin::AsdfPlugin;
 use crate::plugins::mise_plugin_toml::MisePluginToml;
+use crate::plugins::names::normalize_plugin_name;
 use crate::plugins::{PluginType, Script, ScriptManager};
 use crate::toolset::{ToolRequest, ToolVersion, Toolset, install_state};
 use crate::ui::progress_report::SingleReport;
@@ -23,6 +24,7 @@ use crate::{dirs, env, file};
 use async_trait::async_trait;
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use console::style;
+use heck::ToKebabCase;
 
 /// This represents a plugin installed to ~/.local/share/mise/plugins
 pub struct AsdfBackend {
@@ -42,9 +44,20 @@ pub struct AsdfBackend {
 impl AsdfBackend {
     pub fn from_arg(ba: BackendArg) -> Self {
         let name = ba.tool_name.clone();
-        // Get the plugin path and actual plugin name (which may differ from ba.short for local plugins)
-        let (plugin_name, plugin_path) = install_state::get_plugin_path_and_name(&ba.short);
-        let plugin = AsdfPlugin::new(plugin_name, plugin_path.clone());
+        let normalized = normalize_plugin_name(&ba.short);
+
+        // Simple lookup - plugin is already resolved
+        let plugin_info = install_state::get_plugin_info(normalized).unwrap_or_else(|| {
+            // Fallback: use standard path for unregistered plugins
+            install_state::PluginInfo {
+                name: normalized.to_string(),
+                plugin_type: PluginType::Asdf,
+                path: dirs::PLUGINS.join(normalized.to_kebab_case()),
+            }
+        });
+
+        let plugin_path = plugin_info.path.clone();
+        let plugin = AsdfPlugin::new(plugin_info.name, plugin_info.path);
         let mut toml_path = plugin_path.join("mise.plugin.toml");
         if plugin_path.join("rtx.plugin.toml").exists() {
             toml_path = plugin_path.join("rtx.plugin.toml");

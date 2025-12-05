@@ -46,7 +46,7 @@ impl PluginsLs {
         let mut plugins: BTreeMap<String, (PluginType, Option<PathBuf>, Option<String>)> =
             install_state::list_plugins()
                 .iter()
-                .map(|(k, (pt, path))| (k.clone(), (*pt, path.clone(), None)))
+                .map(|(k, info)| (k.clone(), (info.plugin_type, Some(info.path.clone()), None)))
                 .collect();
 
         if self.core {
