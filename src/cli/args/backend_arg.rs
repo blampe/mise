@@ -141,8 +141,14 @@ impl BackendArg {
         // Then check if this is a vfox plugin:tool format
         if let Some((plugin_name, _tool_name)) = self.short.split_once(':') {
             // we cannot reliably determine backend type within install state so we check config first
-            if config::is_loaded() && Config::get_().get_repo_url(plugin_name).is_some() {
-                return BackendType::VfoxBackend(plugin_name.to_string());
+            if config::is_loaded() {
+                let config = Config::get_();
+                // Check if this plugin is defined in config (either Remote or Local)
+                if config.get_plugin_location(plugin_name).is_some()
+                    || config.get_repo_url(plugin_name).is_some()
+                {
+                    return BackendType::VfoxBackend(plugin_name.to_string());
+                }
             }
             if let Some(plugin_type) = install_state::get_plugin_type(plugin_name) {
                 return match plugin_type {

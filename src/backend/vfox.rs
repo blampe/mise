@@ -66,6 +66,7 @@ impl Backend for VfoxBackend {
                 }
 
                 // Use default vfox behavior for traditional plugins
+                // Use pathname to find the plugin directory
                 let versions = vfox.list_available_versions(&this.pathname).await?;
                 Ok(versions
                     .into_iter()
@@ -198,26 +199,61 @@ impl VfoxBackend {
             .ok_or_else(|| eyre::eyre!("VfoxBackend requires a tool name (plugin:tool format)"))
     }
 
+    /// Get the tool name to use for install directory operations.
+    /// For local plugins, this uses the normalized ba.short to match the install directory name.
+    /// For remote plugins, this uses the pathname which matches the plugin directory name.
+    fn install_tool_name(&self) -> &str {
+        if !self.plugin.plugin_path.starts_with(*dirs::PLUGINS) {
+            // Local plugin - use normalized ba.short to match install directory
+            install_state::normalize_plugin_name(&self.ba.short)
+        } else {
+            // Remote plugin - use pathname
+            &self.pathname
+        }
+    }
+
     pub fn from_arg(ba: BackendArg, backend_plugin_name: Option<String>) -> Self {
+        // Normalize the plugin name for consistent lookup
+        let normalized = install_state::normalize_plugin_name(&ba.short);
+
         let pathname = match &backend_plugin_name {
             Some(plugin_name) => plugin_name.clone(),
-            // Normalize first to strip type prefixes, then kebab-case
-            None => install_state::normalize_plugin_name(&ba.short).to_kebab_case(),
+            None => normalized.to_kebab_case(),
         };
 
-        // Get the plugin path and the actual plugin name (which may differ from pathname for local plugins)
-        let (plugin_name, plugin_path) = install_state::get_plugin_path_and_name(&pathname);
-
-        // For local plugins, use the actual directory name as pathname
-        // For standard plugins, use the normalized/kebab-cased name
-        let pathname = if plugin_path.starts_with(&*dirs::PLUGINS) {
-            pathname
+        // First check Config for plugin definitions (like the remote plugin commit does)
+        let (plugin_name, plugin_path) = if crate::config::is_loaded() {
+            let config = crate::config::Config::get_();
+            if let Some(location) = config.get_plugin_location(normalized) {
+                match location {
+                    crate::plugins::PluginLocation::Local(path) => {
+                        // For local plugins, return normalized name and local path
+                        (normalized.to_string(), path.clone())
+                    }
+                    crate::plugins::PluginLocation::Remote(_) => {
+                        // Remote plugins use standard path
+                        install_state::get_plugin_path_and_name(&pathname)
+                    }
+                }
+            } else {
+                // Not in config, fall back to install_state
+                install_state::get_plugin_path_and_name(&pathname)
+            }
         } else {
+            // Config not loaded yet, fall back to install_state
+            install_state::get_plugin_path_and_name(&pathname)
+        };
+
+        // For local plugins, pathname should be the plugin directory name for finding hooks
+        // This is different from the install directory name
+        let pathname = if !plugin_path.starts_with(*dirs::PLUGINS) {
             plugin_path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(&pathname)
                 .to_string()
+        } else {
+            pathname
         };
 
         let mut plugin = VfoxPlugin::new(plugin_name, plugin_path.clone());
@@ -275,7 +311,24 @@ impl VfoxBackend {
                         .await
                         .wrap_err("Backend exec env method failed")?
                 } else {
-                    vfox.env_keys(&self.pathname, &tv.version).await?
+                    // For local plugins, we need to call the plugin directly with the correct install path
+                    // because vfox.env_keys constructs the path from SDK name which may not match
+                    let plugin = vfox.get_sdk(&self.pathname)?;
+                    use std::collections::BTreeMap as StdBTreeMap;
+                    use vfox::hooks::env_keys::EnvKeysContext;
+                    let sdk_info = vfox::sdk_info::SdkInfo::new(
+                        self.install_tool_name().to_string(),
+                        tv.version.clone(),
+                        tv.install_path(),
+                    );
+                    let ctx = EnvKeysContext {
+                        args: vec![],
+                        version: tv.version.clone(),
+                        path: tv.install_path(),
+                        sdk_info: StdBTreeMap::from([(sdk_info.name.clone(), sdk_info.clone())]),
+                        main: sdk_info,
+                    };
+                    plugin.env_keys(ctx).await?
                 };
 
                 Ok(env_keys
@@ -317,7 +370,8 @@ mod test {
     async fn test_vfox_props() {
         let _config = Config::get().await.unwrap();
         let backend = VfoxBackend::from_arg("vfox:version-fox/vfox-golang".into(), None);
-        assert_eq!(backend.pathname, "vfox-version-fox-vfox-golang");
+        // pathname is the normalized plugin name in kebab-case
+        assert_eq!(backend.pathname, "version-fox-vfox-golang");
         assert_eq!(
             backend.plugin.full,
             Some("vfox:version-fox/vfox-golang".to_string())

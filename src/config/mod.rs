@@ -259,6 +259,10 @@ impl Config {
             {
                 // we need to remove aliased tools so they get re-added with updated "full" values
                 backend::remove(short);
+                // Backend keys include type prefix (e.g. "vfox:hello") but config.plugins keys are normalized ("hello")
+                // Try removing with common prefixes to ensure backends with stale paths get recreated
+                backend::remove(&format!("vfox:{}", short));
+                backend::remove(&format!("asdf:{}", short));
             }
         });
 
@@ -340,6 +344,10 @@ impl Config {
                 Ok(ts)
             })
             .await
+    }
+
+    pub fn get_plugin_location(&self, plugin_name: &str) -> Option<&PluginLocation> {
+        self.plugins.get(plugin_name)
     }
 
     pub fn get_repo_url(&self, plugin_name: &str) -> Option<String> {

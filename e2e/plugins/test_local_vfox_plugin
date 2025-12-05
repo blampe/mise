@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 
 # Create a minimal vfox plugin locally
-# Plugin directory: hello-vfox-plugin
-# Plugin name: hello
-# Tool provided: vfox:hello (binary: hello-world)
-mkdir -p hello-vfox-plugin/hooks
+# Plugin name and tool name are DIFFERENT to catch lookup bugs
+# Plugin directory: my-vfox-plugin
+# Plugin name: my-vfox-plugin
+# Tool provided: vfox:demo-tool (binary: demo-tool)
+mkdir -p my-vfox-plugin/hooks
 
-cat >hello-vfox-plugin/metadata.lua <<'EOF'
+cat >my-vfox-plugin/metadata.lua <<'EOF'
 PLUGIN = {}
-PLUGIN.name = "hello"
+PLUGIN.name = "demo-tool"
 PLUGIN.version = "0.1.0"
 PLUGIN.description = "Local test vfox plugin"
 EOF
 
-cat >hello-vfox-plugin/hooks/available.lua <<'EOF'
+cat >my-vfox-plugin/hooks/available.lua <<'EOF'
 function PLUGIN:Available(ctx)
     return {
         {version = "1.0.0"},
@@ -23,7 +24,7 @@ function PLUGIN:Available(ctx)
 end
 EOF
 
-cat >hello-vfox-plugin/hooks/pre_install.lua <<'EOF'
+cat >my-vfox-plugin/hooks/pre_install.lua <<'EOF'
 function PLUGIN:PreInstall(ctx)
     return {
         version = ctx.version
@@ -31,42 +32,53 @@ function PLUGIN:PreInstall(ctx)
 end
 EOF
 
-cat >hello-vfox-plugin/hooks/post_install.lua <<'EOF'
+cat >my-vfox-plugin/hooks/post_install.lua <<'EOF'
 function PLUGIN:PostInstall(ctx)
     local install_path = ctx.rootPath
     os.execute("mkdir -p " .. install_path .. "/bin")
-    local file = io.open(install_path .. "/bin/hello-world", "w")
+    local file = io.open(install_path .. "/bin/demo-tool", "w")
     if file then
         file:write("#!/usr/bin/env bash\n")
-        file:write("echo 'hello-world version " .. ctx.runtimeVersion .. "'\n")
+        file:write("echo 'demo-tool version " .. ctx.runtimeVersion .. "'\n")
         file:close()
-        os.execute("chmod +x " .. install_path .. "/bin/hello-world")
+        os.execute("chmod +x " .. install_path .. "/bin/demo-tool")
     end
 end
 EOF
 
+cat >my-vfox-plugin/hooks/env_keys.lua <<'EOF'
+function PLUGIN:EnvKeys(ctx)
+    return {
+        {
+            key = "PATH",
+            value = ctx.path .. "/bin"
+        }
+    }
+end
+EOF
+
 # Configure mise to use local vfox plugin
-# Register plugin "hello" from local directory
+# Register plugin "my-vfox-plugin" from local directory
 cat >mise.toml <<EOF
 [plugins]
-hello = "./hello-vfox-plugin"
+my-vfox-plugin = "./my-vfox-plugin"
 
 [tools]
-"vfox:hello" = "2.0.0"
+"vfox:demo-tool" = "2.0.0"
 EOF
 
 # Test: plugin appears in plugin ls
-assert_contains "mise plugin ls" "hello"
+assert_contains "mise plugin ls" "my-vfox-plugin"
 
 # Test: can list versions from local vfox plugin
-assert_contains "mise ls-remote vfox:hello" "2.0.0"
+assert_contains "mise ls-remote vfox:demo-tool" "2.0.0"
 
 # Test: can install tool from local vfox plugin
-mise install vfox:hello@2.0.0
-assert_contains "mise ls --installed" "hello"
+mise install vfox:demo-tool@2.0.0
+assert_contains "mise ls --installed" "demo-tool"
 
 # Test: can execute tool
-assert_contains "mise x -- hello-world" "hello-world version 2.0.0"
+assert_contains "mise x -- demo-tool" "demo-tool version 2.0.0"
 
 # Cleanup
-rm -rf hello-vfox-plugin
+rm -rf my-vfox-plugin
