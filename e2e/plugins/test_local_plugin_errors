@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+# Test 1: Nonexistent path
+cat >mise.toml <<EOF
+[plugins]
+missing = "./does-not-exist"
+EOF
+
+assert_fail "mise plugin ls 2>&1" "does not exist"
+
+# Test 2: Path is a file, not directory
+touch plugin-file.txt
+cat >mise.toml <<EOF
+[plugins]
+bad-plugin = "./plugin-file.txt"
+EOF
+
+assert_fail "mise plugin ls 2>&1" "must be a directory"
+
+# Cleanup
+rm -f plugin-file.txt

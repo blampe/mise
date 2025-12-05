@@ -55,7 +55,7 @@ impl SyncNode {
     }
 
     async fn run_brew(&self) -> Result<()> {
-        let node = backend::get(&"node".into()).unwrap();
+        let node = backend::get(&"node".into()).await.unwrap();
 
         let brew_prefix = PathBuf::from(cmd!("brew", "--prefix").read()?).join("opt");
         let installed_versions_path = dirs::INSTALLS.join("node");
@@ -79,7 +79,7 @@ impl SyncNode {
     }
 
     async fn run_nvm(&self) -> Result<()> {
-        let node = backend::get(&"node".into()).unwrap();
+        let node = backend::get(&"node".into()).await.unwrap();
 
         let nvm_versions_path = NVM_DIR.join("versions").join("node");
         let installed_versions_path = dirs::INSTALLS.join("node");
@@ -112,7 +112,7 @@ impl SyncNode {
     }
 
     async fn run_nodenv(&self) -> Result<()> {
-        let node = backend::get(&"node".into()).unwrap();
+        let node = backend::get(&"node".into()).await.unwrap();
 
         let nodenv_versions_path = NODENV_ROOT.join("versions");
         let installed_versions_path = dirs::INSTALLS.join("node");

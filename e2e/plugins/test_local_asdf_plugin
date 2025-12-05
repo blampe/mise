@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+
+# Create a minimal ASDF plugin locally
+# For ASDF plugins, plugin name MUST match tool name (ASDF limitation)
+# Plugin directory: my-asdf-plugin
+# Plugin name (in config): my-asdf-plugin
+# Tool name (in config): my-asdf-plugin
+# Binary provided: demo-tool (can differ from tool name)
+mkdir -p my-asdf-plugin/bin
+cat >my-asdf-plugin/bin/list-all <<'EOF'
+#!/usr/bin/env bash
+echo "1.0.0 2.0.0 3.0.0"
+EOF
+chmod +x my-asdf-plugin/bin/list-all
+
+cat >my-asdf-plugin/bin/install <<'EOF'
+#!/usr/bin/env bash
+echo "Installing version $ASDF_INSTALL_VERSION"
+mkdir -p "$ASDF_INSTALL_PATH/bin"
+cat > "$ASDF_INSTALL_PATH/bin/demo-tool" <<TOOL
+#!/usr/bin/env bash
+echo "demo-tool version $ASDF_INSTALL_VERSION"
+TOOL
+chmod +x "$ASDF_INSTALL_PATH/bin/demo-tool"
+EOF
+chmod +x my-asdf-plugin/bin/install
+
+# Configure mise to use local plugin
+# Register plugin "my-asdf-plugin" from local directory
+cat >mise.toml <<EOF
+[plugins]
+my-asdf-plugin = "./my-asdf-plugin"
+
+[tools]
+my-asdf-plugin = "2.0.0"
+EOF
+
+# Test: plugin appears in plugin ls
+assert_contains "mise plugin ls" "my-asdf-plugin"
+
+# Test: can list versions from local plugin
+assert_contains "mise ls-remote my-asdf-plugin" "2.0.0"
+
+# Test: can install tool from local plugin
+mise install my-asdf-plugin@2.0.0
+assert_contains "mise ls --installed" "my-asdf-plugin"
+
+# Test: can execute binary (note: binary name can differ from tool name)
+assert_contains "mise x -- demo-tool" "demo-tool version 2.0.0"
+
+# Cleanup
+rm -rf my-asdf-plugin

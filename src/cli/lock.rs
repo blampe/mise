@@ -311,7 +311,7 @@ impl Lock {
                 jset.spawn(async move {
                     let _permit = semaphore.acquire().await;
                     let target = PlatformTarget::new(platform.clone());
-                    let backend = crate::backend::get(&ba);
+                    let backend = crate::backend::get_cached(&ba);
 
                     let (info, options) = if let Some(backend) = backend {
                         let options = backend.resolve_lockfile_options(&tv.request, &target);

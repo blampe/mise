@@ -1,8 +1,9 @@
 ---
 source: src/config/config_file/mise_toml.rs
 expression: cf.plugins().unwrap()
-snapshot_kind: text
 ---
 {
-    "node": "https://github.com/jdx/rtx-node",
+    "node": Remote(
+        "https://github.com/jdx/rtx-node",
+    ),
 }

@@ -208,7 +208,7 @@ impl ToolRequest {
     }
 
     pub async fn is_installed(&self, config: &Arc<Config>) -> bool {
-        if let Some(backend) = backend::get(self.ba()) {
+        if let Some(backend) = backend::get_cached(self.ba()) {
             match self.resolve(config, &Default::default()).await {
                 Ok(tv) => backend.is_version_installed(config, &tv, false),
                 Err(e) => {
@@ -290,7 +290,7 @@ impl ToolRequest {
         if let Some(lt) = self.lockfile_resolve(config)? {
             return Ok(Some(lt.version));
         }
-        if let Some(backend) = backend::get(self.ba()) {
+        if let Some(backend) = backend::get_cached(self.ba()) {
             let matches = backend.list_installed_versions_matching(v);
             if matches.iter().any(|m| m == v) {
                 return Ok(Some(v.to_string()));

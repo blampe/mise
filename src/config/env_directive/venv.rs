@@ -58,7 +58,7 @@ impl EnvResults {
                     .to_string()
             });
             let installed = if let Some(tv) = tv {
-                let backend = backend::get(&ba).unwrap();
+                let backend = backend::get(&ba).await.unwrap();
                 backend.is_version_installed(config, tv, false)
             } else {
                 // if no version is specified, we're assuming python3 is provided outside of mise so return "true" here

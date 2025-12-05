@@ -159,7 +159,7 @@ impl Vfox {
             let sdk_info = sdk.sdk_info(version.to_string(), install_dir.to_path_buf())?;
             sdk.post_install(PostInstallContext {
                 root_path: install_dir.to_path_buf(),
-                runtime_version: self.runtime_version.clone(),
+                runtime_version: version.to_string(),
                 sdk_info: BTreeMap::from([(sdk_info.name.clone(), sdk_info)]),
             })
             .await?;

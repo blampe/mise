@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+
+# Create a minimal vfox plugin locally
+# Plugin name and tool name can be DIFFERENT for vfox plugins
+# Plugin directory: my-vfox-plugin
+# Plugin name (in config): my-vfox-plugin
+# Tool reference (in config): vfox:my-vfox-plugin
+# Tool name (in metadata.lua): demo-tool
+# Binary provided: demo-tool
+mkdir -p my-vfox-plugin/hooks
+
+cat >my-vfox-plugin/metadata.lua <<'EOF'
+PLUGIN = {}
+PLUGIN.name = "demo-tool"
+PLUGIN.version = "0.1.0"
+PLUGIN.description = "Local test vfox plugin"
+EOF
+
+cat >my-vfox-plugin/hooks/available.lua <<'EOF'
+function PLUGIN:Available(ctx)
+    return {
+        {version = "1.0.0"},
+        {version = "2.0.0"},
+        {version = "3.0.0"}
+    }
+end
+EOF
+
+cat >my-vfox-plugin/hooks/pre_install.lua <<'EOF'
+function PLUGIN:PreInstall(ctx)
+    return {
+        version = ctx.version
+    }
+end
+EOF
+
+cat >my-vfox-plugin/hooks/post_install.lua <<'EOF'
+function PLUGIN:PostInstall(ctx)
+    local install_path = ctx.rootPath
+    os.execute("mkdir -p " .. install_path .. "/bin")
+    local file = io.open(install_path .. "/bin/demo-tool", "w")
+    if file then
+        file:write("#!/usr/bin/env bash\n")
+        file:write("echo 'demo-tool version " .. ctx.runtimeVersion .. "'\n")
+        file:close()
+        os.execute("chmod +x " .. install_path .. "/bin/demo-tool")
+    end
+end
+EOF
+
+cat >my-vfox-plugin/hooks/env_keys.lua <<'EOF'
+function PLUGIN:EnvKeys(ctx)
+    return {
+        {
+            key = "PATH",
+            value = ctx.path .. "/bin"
+        }
+    }
+end
+EOF
+
+# Configure mise to use local vfox plugin
+# Register plugin "my-vfox-plugin" from local directory
+# Tool reference uses plugin name, but metadata.lua defines the actual tool name
+cat >mise.toml <<EOF
+[plugins]
+my-vfox-plugin = "./my-vfox-plugin"
+
+[tools]
+"vfox:my-vfox-plugin" = "2.0.0"
+EOF
+
+# Test: plugin appears in plugin ls
+assert_contains "mise plugin ls" "my-vfox-plugin"
+
+# Test: can list versions from local vfox plugin
+assert_contains "mise ls-remote vfox:my-vfox-plugin" "2.0.0"
+
+# Test: can install tool from local vfox plugin
+mise install vfox:my-vfox-plugin@2.0.0
+assert_contains "mise ls --installed" "my-vfox-plugin"
+
+# Test: can execute binary (metadata.lua defines the tool name as "demo-tool")
+assert_contains "mise x -- demo-tool" "demo-tool version 2.0.0"
+
+# Cleanup
+rm -rf my-vfox-plugin

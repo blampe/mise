@@ -12,7 +12,7 @@ use crate::cli::exec::Exec;
 use crate::config::{Config, Settings};
 use crate::file::display_path;
 use crate::lock_file::LockFile;
-use crate::toolset::{ToolVersion, Toolset, ToolsetBuilder};
+use crate::toolset::{ToolVersion, Toolset, ToolsetBuilder, install_state};
 use crate::{backend, dirs, env, fake_asdf, file};
 use color_eyre::eyre::{Result, bail, eyre};
 use eyre::WrapErr;
@@ -121,7 +121,13 @@ pub async fn reshim(config: &Arc<Config>, ts: &Toolset, force: bool) -> Result<(
     let mut jset = JoinSet::new();
     for plugin in backend::list() {
         jset.spawn(async move {
-            if let Ok(files) = dirs::PLUGINS.join(plugin.id()).join("shims").read_dir() {
+            let shims_path = if let Some(p) = plugin.plugin() {
+                p.path().join("shims")
+            } else {
+                install_state::get_plugin_path(plugin.id()).join("shims")
+            };
+
+            if let Ok(files) = shims_path.read_dir() {
                 for bin in files {
                     let bin = bin?;
                     let bin_name = bin.file_name().into_string().unwrap();

@@ -15,8 +15,9 @@ use crate::install_context::InstallContext;
 use crate::plugins::Script::{Download, ExecEnv, Install, ParseIdiomaticFile};
 use crate::plugins::asdf_plugin::AsdfPlugin;
 use crate::plugins::mise_plugin_toml::MisePluginToml;
+use crate::plugins::names::normalize_plugin_name;
 use crate::plugins::{PluginType, Script, ScriptManager};
-use crate::toolset::{ToolRequest, ToolVersion, Toolset};
+use crate::toolset::{ToolRequest, ToolVersion, Toolset, install_state};
 use crate::ui::progress_report::SingleReport;
 use crate::{backend::Backend, plugins::PluginEnum, timeout};
 use crate::{dirs, env, file};
@@ -41,10 +42,33 @@ pub struct AsdfBackend {
 }
 
 impl AsdfBackend {
-    pub fn from_arg(ba: BackendArg) -> Self {
+    pub async fn from_arg(ba: BackendArg) -> Self {
         let name = ba.tool_name.clone();
-        let plugin_path = dirs::PLUGINS.join(ba.short.to_kebab_case());
-        let plugin = AsdfPlugin::new(name.clone(), plugin_path.clone());
+        let normalized = normalize_plugin_name(&ba.short);
+
+        // PHASE 3 & 4: Try sync first (fast path for already-resolved plugins), then await
+        let plugin_info = if let Some(info) = install_state::get_plugin_info_sync(normalized) {
+            info
+        } else {
+            // Await resolution (slow path) - plugins were registered in Phase 2
+            install_state::get_plugin_info(normalized)
+                .await
+                .unwrap_or_else(|| {
+                    // Final fallback: use standard path for truly unknown plugins
+                    warn!(
+                        "Plugin '{}' not found in registry, using default path",
+                        normalized
+                    );
+                    install_state::PluginInfo {
+                        name: normalized.to_string(),
+                        plugin_type: PluginType::Asdf,
+                        path: dirs::PLUGINS.join(normalized.to_kebab_case()),
+                    }
+                })
+        };
+
+        let plugin_path = plugin_info.path.clone();
+        let plugin = AsdfPlugin::new(plugin_info.name, plugin_info.path);
         let mut toml_path = plugin_path.join("mise.plugin.toml");
         if plugin_path.join("rtx.plugin.toml").exists() {
             toml_path = plugin_path.join("rtx.plugin.toml");
@@ -432,7 +456,7 @@ mod tests {
     #[tokio::test]
     async fn test_debug() {
         let _config = Config::get().await.unwrap();
-        let plugin = AsdfBackend::from_arg("dummy".into());
+        let plugin = AsdfBackend::from_arg("dummy".into()).await;
         assert!(format!("{plugin:?}").starts_with("AsdfPlugin { name: \"dummy\""));
     }
 }

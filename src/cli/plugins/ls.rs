@@ -1,5 +1,6 @@
 use eyre::Result;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use tabled::{Table, Tabled};
 
 use crate::config::Config;
@@ -42,10 +43,11 @@ pub struct PluginsLs {
 
 impl PluginsLs {
     pub async fn run(self, config: &Config) -> Result<()> {
-        let mut plugins: BTreeMap<_, _> = install_state::list_plugins()
-            .iter()
-            .map(|(k, p)| (k.clone(), (*p, None)))
-            .collect();
+        let mut plugins: BTreeMap<String, (PluginType, Option<PathBuf>, Option<String>)> =
+            install_state::list_plugins()
+                .iter()
+                .map(|(k, info)| (k.clone(), (info.plugin_type, Some(info.path.clone()), None)))
+                .collect();
 
         if self.core {
             for p in CORE_PLUGINS.keys() {
@@ -58,15 +60,15 @@ impl PluginsLs {
             for (name, backends) in &config.shorthands {
                 for full in backends {
                     let plugin_type = PluginType::from_full(full)?;
-                    plugins.insert(name.clone(), (plugin_type, Some(full_to_url(full))));
+                    plugins.insert(name.clone(), (plugin_type, None, Some(full_to_url(full))));
                 }
             }
         }
 
         let plugins = plugins
             .into_iter()
-            .map(|(short, (pt, url))| {
-                let plugin = pt.plugin(short.clone());
+            .map(|(short, (pt, path, url))| {
+                let plugin = pt.plugin(short.clone(), path);
                 if let Some(url) = url {
                     plugin.set_remote_url(url);
                 }

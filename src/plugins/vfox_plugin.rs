@@ -82,7 +82,16 @@ impl VfoxPlugin {
 
     pub fn vfox(&self) -> (Vfox, mpsc::Receiver<String>) {
         let mut vfox = Vfox::new();
-        vfox.plugin_dir = dirs::PLUGINS.to_path_buf();
+        // For local plugins (outside dirs::PLUGINS), use the actual plugin path's parent
+        // For standard plugins, use dirs::PLUGINS
+        vfox.plugin_dir = if self.plugin_path.starts_with(*dirs::PLUGINS) {
+            dirs::PLUGINS.to_path_buf()
+        } else {
+            self.plugin_path
+                .parent()
+                .unwrap_or(&self.plugin_path)
+                .to_path_buf()
+        };
         vfox.cache_dir = dirs::CACHE.to_path_buf();
         vfox.download_dir = dirs::DOWNLOADS.to_path_buf();
         vfox.install_dir = dirs::INSTALLS.to_path_buf();
@@ -162,14 +171,39 @@ impl Plugin for VfoxPlugin {
         _force: bool,
         dry_run: bool,
     ) -> Result<()> {
-        if !self.plugin_path.exists() {
-            let url = self.get_repo_url(config)?;
-            trace!("Cloning vfox plugin: {url}");
-            let pr = mpr.add_with_options(&format!("clone vfox plugin {url}"), dry_run);
-            if !dry_run {
-                self.repo()
-                    .clone(url.as_str(), CloneOptions::default().pr(pr.as_ref()))?;
-            }
+        // Early return if plugin_path exists (local plugin or already cloned)
+        if self.plugin_path.exists() {
+            return Ok(());
+        }
+
+        // Check for broken symlinks
+        if self.plugin_path.is_symlink() {
+            return Err(eyre!(
+                "Plugin {} is a broken symlink: {}",
+                self.name,
+                display_path(&self.plugin_path)
+            ));
+        }
+
+        // Detect local plugins: if path is NOT in dirs::PLUGINS, it's a local plugin
+        // Local plugins configured in mise.toml should already exist
+        let is_standard_plugin_path = self.plugin_path.starts_with(*dirs::PLUGINS);
+        if !is_standard_plugin_path {
+            return Err(eyre!(
+                "Local plugin path does not exist: {}\n\
+                 Local plugins must exist on disk before use.\n\
+                 Hint: Check your mise.toml [plugins] configuration.",
+                display_path(&self.plugin_path)
+            ));
+        }
+
+        // Standard plugin path that doesn't exist - try to clone from URL
+        let url = self.get_repo_url(config)?;
+        trace!("Cloning vfox plugin: {url}");
+        let pr = mpr.add_with_options(&format!("clone vfox plugin {url}"), dry_run);
+        if !dry_run {
+            self.repo()
+                .clone(url.as_str(), CloneOptions::default().pr(pr.as_ref()))?;
         }
         Ok(())
     }
@@ -287,4 +321,83 @@ fn vfox_to_url(name: &str) -> eyre::Result<Url> {
         name.to_string().parse()
     };
     res.wrap_err_with(|| format!("Invalid version: {name}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::ui::multi_progress_report::MultiProgressReport;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_ensure_installed_local_plugin() {
+        // Setup: Create a minimal local vfox plugin structure
+        let temp = TempDir::new().unwrap();
+        let plugin_dir = temp.path().join("local-vfox-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        fs::write(plugin_dir.join("metadata.lua"), "PLUGIN = {}").unwrap();
+
+        // Create VfoxPlugin pointing to local path
+        let plugin = VfoxPlugin::new("test-plugin".to_string(), plugin_dir.clone());
+
+        // Create config
+        let config = Config::get().await.unwrap();
+        let mpr = MultiProgressReport::get();
+
+        // Test: ensure_installed should NOT try to clone
+        // This should succeed without network access
+        let result = plugin.ensure_installed(&config, &mpr, false, false).await;
+
+        // Verify: should succeed since plugin dir already exists
+        assert!(result.is_ok());
+        assert!(plugin.is_installed());
+    }
+
+    #[tokio::test]
+    async fn test_ensure_installed_local_plugin_missing() {
+        // Setup: Create path but don't create the actual directory
+        let temp = TempDir::new().unwrap();
+        let plugin_dir = temp.path().join("nonexistent-plugin");
+
+        let plugin = VfoxPlugin::new("test-plugin".to_string(), plugin_dir.clone());
+        let config = Config::get().await.unwrap();
+        let mpr = MultiProgressReport::get();
+
+        // Test: ensure_installed with missing local path should fail with clear error
+        let result = plugin.ensure_installed(&config, &mpr, false, false).await;
+
+        // Verify: should fail because path doesn't exist and it's local (no URL to clone)
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Local plugin path does not exist"),
+            "Expected error about local plugin path, got: {err_msg}"
+        );
+        assert!(!plugin.is_installed());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_ensure_installed_symlink_plugin() {
+        // Setup: Create actual plugin and symlink to it
+        let temp = TempDir::new().unwrap();
+        let real_plugin = temp.path().join("real-plugin");
+        let symlink_path = temp.path().join("symlink-plugin");
+
+        fs::create_dir_all(&real_plugin).unwrap();
+        fs::write(real_plugin.join("metadata.lua"), "PLUGIN = {}").unwrap();
+
+        std::os::unix::fs::symlink(&real_plugin, &symlink_path).unwrap();
+
+        let plugin = VfoxPlugin::new("test-plugin".to_string(), symlink_path.clone());
+        let config = Config::get().await.unwrap();
+        let mpr = MultiProgressReport::get();
+
+        // Test: symlinked plugins should not be cloned
+        let result = plugin.ensure_installed(&config, &mpr, false, false).await;
+        assert!(result.is_ok());
+        assert!(plugin.is_installed());
+    }
 }

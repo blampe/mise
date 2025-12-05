@@ -3,14 +3,15 @@ use crate::cli::args::BackendArg;
 use crate::file::display_path;
 use crate::git::Git;
 use crate::plugins::PluginType;
+use crate::plugins::names::normalize_plugin_name;
 use crate::{dirs, file, runtime_symlinks};
 use eyre::{Ok, Result};
 use heck::ToKebabCase;
 use itertools::Itertools;
 use std::collections::BTreeMap;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tokio::sync::OnceCell;
 use tokio::task::JoinSet;
 use versions::Versioning;
 
@@ -22,7 +23,27 @@ fn normalize_version_for_sort(v: &str) -> &str {
         .unwrap_or(v)
 }
 
-type InstallStatePlugins = BTreeMap<String, PluginType>;
+/// Complete information about an installed or registered plugin.
+/// This represents a fully resolved plugin with normalized name, type, and path.
+#[derive(Debug, Clone)]
+pub struct PluginInfo {
+    /// Normalized plugin name (no type prefixes)
+    pub name: String,
+    /// Plugin type (Asdf, Vfox, or VfoxBackend)
+    pub plugin_type: PluginType,
+    /// Absolute path to the plugin directory
+    pub path: PathBuf,
+}
+
+impl PluginInfo {
+    /// Returns true if this is a local plugin (outside dirs::PLUGINS).
+    /// This is a derived property based on the path.
+    pub fn is_local(&self) -> bool {
+        !self.path.starts_with(*dirs::PLUGINS)
+    }
+}
+
+type InstallStatePlugins = BTreeMap<String, Arc<OnceCell<PluginInfo>>>;
 type InstallStateTools = BTreeMap<String, InstallStateTool>;
 type MutexResult<T> = Result<Arc<T>>;
 
@@ -46,6 +67,40 @@ pub(crate) async fn init() -> Result<()> {
     Ok(())
 }
 
+/// Detect plugin type by inspecting the plugin directory
+pub fn detect_plugin_type(path: &Path) -> Result<PluginType> {
+    // Validate upfront to provide clear error messages before attempting
+    // to inspect plugin marker files.
+    if !path.exists() {
+        return Err(eyre::eyre!(
+            "Plugin path does not exist: {}",
+            display_path(path)
+        ));
+    }
+    if !path.is_dir() {
+        return Err(eyre::eyre!(
+            "Plugin path is not a directory: {}",
+            display_path(path)
+        ));
+    }
+
+    if path.join("metadata.lua").exists() {
+        if has_backend_methods(path) {
+            Ok(PluginType::VfoxBackend)
+        } else {
+            Ok(PluginType::Vfox)
+        }
+    } else if path.join("bin").join("list-all").exists() {
+        Ok(PluginType::Asdf)
+    } else {
+        Err(eyre::eyre!(
+            "Unable to detect plugin type for: {}. \
+             Missing metadata.lua (vfox) or bin/list-all (asdf)",
+            display_path(path)
+        ))
+    }
+}
+
 async fn init_plugins() -> MutexResult<InstallStatePlugins> {
     if let Some(plugins) = INSTALL_STATE_PLUGINS
         .lock()
@@ -54,29 +109,49 @@ async fn init_plugins() -> MutexResult<InstallStatePlugins> {
     {
         return Ok(plugins);
     }
-    let dirs = file::dir_subdirs(&dirs::PLUGINS)?;
-    let plugins: InstallStatePlugins = dirs
-        .into_iter()
-        .filter_map(|d| {
-            time!("init_plugins {d}");
-            let path = dirs::PLUGINS.join(&d);
-            if is_banned_plugin(&path) {
-                info!("removing banned plugin {d}");
-                let _ = file::remove_all(&path);
-                None
-            } else if path.join("metadata.lua").exists() {
-                if has_backend_methods(&path) {
-                    Some((d, PluginType::VfoxBackend))
-                } else {
-                    Some((d, PluginType::Vfox))
+
+    let plugin_dir = &*dirs::PLUGINS;
+    if !plugin_dir.exists() {
+        let plugins = Arc::new(BTreeMap::new());
+        *INSTALL_STATE_PLUGINS
+            .lock()
+            .expect("INSTALL_STATE_PLUGINS lock failed") = Some(plugins.clone());
+        return Ok(plugins);
+    }
+
+    // Phase 1: Scan and register refs
+    let dirs = file::dir_subdirs(plugin_dir)?;
+    let mut plugins = BTreeMap::new();
+
+    for d in dirs {
+        time!("init_plugins {d}");
+        let path = plugin_dir.join(&d);
+        if is_banned_plugin(&path) {
+            info!("removing banned plugin {d}");
+            let _ = file::remove_all(&path);
+            continue;
+        }
+
+        let cell = Arc::new(OnceCell::new());
+        plugins.insert(d.clone(), cell.clone());
+
+        // Phase 2: Spawn resolution task
+        tokio::spawn(async move {
+            match detect_plugin_type(&path) {
+                eyre::Result::Ok(plugin_type) => {
+                    let _ = cell.set(PluginInfo {
+                        name: d,
+                        plugin_type,
+                        path,
+                    });
                 }
-            } else if path.join("bin").join("list-all").exists() {
-                Some((d, PluginType::Asdf))
-            } else {
-                None
+                eyre::Result::Err(e) => {
+                    debug!("Failed to detect plugin type: {:#}", e);
+                }
             }
-        })
-        .collect();
+        });
+    }
+
     let plugins = Arc::new(plugins);
     *INSTALL_STATE_PLUGINS
         .lock()
@@ -130,20 +205,23 @@ async fn init_tools() -> MutexResult<InstallStateTools> {
         .into_iter()
         .filter(|(_, tool)| !tool.versions.is_empty())
         .collect::<BTreeMap<_, _>>();
-    for (short, pt) in init_plugins().await?.iter() {
-        let full = match pt {
-            PluginType::Asdf => format!("asdf:{short}"),
-            PluginType::Vfox => format!("vfox:{short}"),
-            PluginType::VfoxBackend => short.clone(),
-        };
-        let tool = tools
-            .entry(short.clone())
-            .or_insert_with(|| InstallStateTool {
-                short: short.clone(),
-                full: Some(full.clone()),
-                versions: Default::default(),
-            });
-        tool.full = Some(full);
+    for (short, plugin_cell) in init_plugins().await?.iter() {
+        // Try to get plugin info if already resolved (sync check)
+        if let Some(plugin_info) = plugin_cell.get() {
+            let full = match plugin_info.plugin_type {
+                PluginType::Asdf => format!("asdf:{short}"),
+                PluginType::Vfox => format!("vfox:{short}"),
+                PluginType::VfoxBackend => short.clone(),
+            };
+            let tool = tools
+                .entry(short.clone())
+                .or_insert_with(|| InstallStateTool {
+                    short: short.clone(),
+                    full: Some(full.clone()),
+                    versions: Default::default(),
+                });
+            tool.full = Some(full);
+        }
     }
     let tools = Arc::new(tools);
     *INSTALL_STATE_TOOLS
@@ -152,13 +230,99 @@ async fn init_tools() -> MutexResult<InstallStateTools> {
     Ok(tools)
 }
 
-pub fn list_plugins() -> Arc<BTreeMap<String, PluginType>> {
+fn list_plugin_cells() -> Arc<InstallStatePlugins> {
     INSTALL_STATE_PLUGINS
         .lock()
         .expect("INSTALL_STATE_PLUGINS lock failed")
         .as_ref()
         .expect("INSTALL_STATE_PLUGINS is None")
         .clone()
+}
+
+/// Register a plugin reference (creates OnceCell entry)
+pub fn register_plugin_ref(name: String) {
+    debug!("Registering plugin ref: {}", name);
+    let mut plugins_lock = INSTALL_STATE_PLUGINS.lock().expect("lock failed");
+
+    // Initialize map if it doesn't exist yet, or clone existing one
+    let existing = plugins_lock.get_or_insert_with(|| Arc::new(BTreeMap::new()));
+    let mut new_map: BTreeMap<_, _> = (**existing).clone();
+
+    let was_new = !new_map.contains_key(&name);
+    new_map
+        .entry(name.clone())
+        .or_insert_with(|| Arc::new(OnceCell::new()));
+    *plugins_lock = Some(Arc::new(new_map));
+
+    if was_new {
+        debug!("Registered new plugin ref: {}", name);
+    }
+}
+
+/// Resolve a plugin (populate OnceCell with PluginInfo)
+pub async fn resolve_plugin(name: &str, info: PluginInfo) -> Result<()> {
+    if let Some(cell) = list_plugin_cells().get(name) {
+        debug!(
+            "Resolving plugin '{}' with type {:?}",
+            name, info.plugin_type
+        );
+        cell.set(info)
+            .map_err(|_| eyre::eyre!("Plugin already resolved"))?;
+        debug!("Successfully resolved plugin '{}'", name);
+    } else {
+        warn!(
+            "Plugin '{}' not found in registry when trying to resolve",
+            name
+        );
+    }
+    Ok(())
+}
+
+/// Get plugin info, awaiting resolution with timeout
+pub async fn get_plugin_info(name: &str) -> Option<PluginInfo> {
+    use tokio::time::{Duration, Instant, sleep};
+
+    let cells = list_plugin_cells();
+    let cell = cells.get(name)?;
+    let timeout_duration = Duration::from_secs(30); // TODO: make configurable
+    let start = Instant::now();
+    let poll_interval = Duration::from_millis(10);
+
+    // Poll until initialized or timeout
+    loop {
+        if let Some(info) = cell.get() {
+            return Some(info.clone());
+        }
+
+        if start.elapsed() >= timeout_duration {
+            warn!(
+                "Plugin '{}' resolution timed out after {}s, using fallback",
+                name,
+                timeout_duration.as_secs()
+            );
+            // Return default PluginInfo as fallback
+            return Some(PluginInfo {
+                name: name.to_string(),
+                plugin_type: PluginType::Asdf, // Default guess
+                path: dirs::PLUGINS.join(name.to_kebab_case()),
+            });
+        }
+
+        sleep(poll_interval).await;
+    }
+}
+
+/// Get plugin info synchronously (returns None if not yet resolved)
+pub fn get_plugin_info_sync(name: &str) -> Option<PluginInfo> {
+    list_plugin_cells().get(name)?.get().cloned()
+}
+
+/// List all plugins that have been resolved (sync check)
+pub fn list_plugins() -> BTreeMap<String, PluginInfo> {
+    list_plugin_cells()
+        .iter()
+        .filter_map(|(name, cell)| cell.get().map(|info| (name.clone(), info.clone())))
+        .collect()
 }
 
 fn is_banned_plugin(path: &Path) -> bool {
@@ -184,7 +348,7 @@ pub fn get_tool_full(short: &str) -> Option<String> {
 }
 
 pub fn get_plugin_type(short: &str) -> Option<PluginType> {
-    list_plugins().get(short).cloned()
+    get_plugin_info_sync(short).map(|info| info.plugin_type)
 }
 
 pub fn list_tools() -> Arc<BTreeMap<String, InstallStateTool>> {
@@ -217,13 +381,24 @@ pub fn list_versions(short: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub async fn add_plugin(short: &str, plugin_type: PluginType) -> Result<()> {
-    let mut plugins = init_plugins().await?.deref().clone();
-    plugins.insert(short.to_string(), plugin_type);
-    *INSTALL_STATE_PLUGINS
-        .lock()
-        .expect("INSTALL_STATE_PLUGINS lock failed") = Some(Arc::new(plugins));
-    Ok(())
+/// Get the path for a plugin, checking for local plugins first, then falling back to the standard plugins directory.
+/// Returns (plugin_name, plugin_path) where plugin_name is the normalized name.
+pub fn get_plugin_path_and_name(short: &str) -> (String, PathBuf) {
+    // Normalize the plugin name for consistent lookup
+    let normalized_name = normalize_plugin_name(short);
+
+    // Single lookup with normalized name (sync check)
+    if let Some(info) = get_plugin_info_sync(normalized_name) {
+        return (info.name.clone(), info.path.clone());
+    }
+
+    // Fall back to standard plugins directory
+    (short.to_string(), dirs::PLUGINS.join(short.to_kebab_case()))
+}
+
+/// Get the path for a plugin, checking for local plugins first, then falling back to the standard plugins directory.
+pub fn get_plugin_path(short: &str) -> PathBuf {
+    get_plugin_path_and_name(short).1
 }
 
 fn backend_meta_path(short: &str) -> PathBuf {
@@ -276,13 +451,14 @@ fn read_backend_meta(short: &str) -> Option<Vec<String>> {
     }
 }
 
-pub fn write_backend_meta(ba: &BackendArg) -> Result<()> {
+pub fn write_backend_meta(ba: &BackendArg, install_path: &Path) -> Result<()> {
     let full = match ba.full() {
         full if full.starts_with("core:") => ba.full(),
         _ => ba.full_with_opts(),
     };
     let doc = format!("{}\n{}", ba.short, full);
-    file::write(backend_meta_path(&ba.short), doc.trim())?;
+    let meta_path = install_path.join(".mise.backend");
+    file::write(meta_path, doc.trim())?;
     Ok(())
 }
 
@@ -347,5 +523,36 @@ mod tests {
 
         // 2.0.35 should be first
         assert_eq!(**sorted_with_norm.first().unwrap(), "2.0.35");
+    }
+
+    #[test]
+    fn test_detect_plugin_type_asdf_and_vfox() {
+        use crate::file::{create_dir_all, remove_all, write};
+        use crate::plugins::PluginType;
+        use std::path::PathBuf;
+
+        // Test ASDF plugin detection
+        let asdf_dir = PathBuf::from("/tmp/test-asdf-plugin");
+        create_dir_all(asdf_dir.join("bin")).unwrap();
+        write(
+            asdf_dir.join("bin").join("list-all"),
+            "#!/bin/bash\necho 1.0.0",
+        )
+        .unwrap();
+
+        let result = super::detect_plugin_type(&asdf_dir).unwrap();
+        assert_eq!(result, PluginType::Asdf);
+
+        remove_all(&asdf_dir).unwrap();
+
+        // Test vfox plugin detection
+        let vfox_dir = PathBuf::from("/tmp/test-vfox-plugin");
+        create_dir_all(&vfox_dir).unwrap();
+        write(vfox_dir.join("metadata.lua"), "return {}").unwrap();
+
+        let result = super::detect_plugin_type(&vfox_dir).unwrap();
+        assert_eq!(result, PluginType::Vfox);
+
+        remove_all(&vfox_dir).unwrap();
     }
 }

@@ -1,4 +1,8 @@
-use crate::{env, plugins::PluginEnum, timeout};
+use crate::{
+    env,
+    plugins::{PluginEnum, PluginType},
+    timeout,
+};
 use async_trait::async_trait;
 use eyre::WrapErr;
 use heck::ToKebabCase;
@@ -19,8 +23,9 @@ use crate::dirs;
 use crate::env_diff::EnvMap;
 use crate::install_context::InstallContext;
 use crate::plugins::Plugin;
+use crate::plugins::names::normalize_plugin_name;
 use crate::plugins::vfox_plugin::VfoxPlugin;
-use crate::toolset::{ToolVersion, Toolset};
+use crate::toolset::{ToolVersion, Toolset, install_state};
 use crate::ui::multi_progress_report::MultiProgressReport;
 
 #[derive(Debug)]
@@ -66,6 +71,7 @@ impl Backend for VfoxBackend {
                 }
 
                 // Use default vfox behavior for traditional plugins
+                // Use pathname to find the plugin directory
                 let versions = vfox.list_available_versions(&this.pathname).await?;
                 Ok(versions
                     .into_iter()
@@ -198,14 +204,54 @@ impl VfoxBackend {
             .ok_or_else(|| eyre::eyre!("VfoxBackend requires a tool name (plugin:tool format)"))
     }
 
-    pub fn from_arg(ba: BackendArg, backend_plugin_name: Option<String>) -> Self {
+    pub async fn from_arg(ba: BackendArg, backend_plugin_name: Option<String>) -> Self {
+        let normalized = normalize_plugin_name(&ba.short);
+
+        // Determine pathname for vfox SDK lookups
         let pathname = match &backend_plugin_name {
             Some(plugin_name) => plugin_name.clone(),
-            None => ba.short.to_kebab_case(),
+            None => normalized.to_kebab_case(),
         };
 
-        let plugin_path = dirs::PLUGINS.join(&pathname);
-        let mut plugin = VfoxPlugin::new(pathname.clone(), plugin_path.clone());
+        // PHASE 3 & 4: Try sync first (fast path for already-resolved plugins), then await
+        let plugin_info = if let Some(info) = install_state::get_plugin_info_sync(normalized) {
+            info
+        } else {
+            // Await resolution (slow path) - plugins were registered in Phase 2
+            install_state::get_plugin_info(normalized)
+                .await
+                .unwrap_or_else(|| {
+                    // Final fallback: use standard path for truly unknown plugins
+                    warn!(
+                        "Plugin '{}' not found in registry, using default path",
+                        normalized
+                    );
+                    install_state::PluginInfo {
+                        name: normalized.to_string(),
+                        plugin_type: if backend_plugin_name.is_some() {
+                            PluginType::VfoxBackend
+                        } else {
+                            PluginType::Vfox
+                        },
+                        path: dirs::PLUGINS.join(pathname.to_kebab_case()),
+                    }
+                })
+        };
+
+        // For local plugins, pathname should be the directory name for finding hooks
+        // For remote plugins, use the normalized kebab-case name
+        let pathname = if plugin_info.is_local() {
+            plugin_info
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&pathname)
+                .to_string()
+        } else {
+            pathname
+        };
+
+        let mut plugin = VfoxPlugin::new(plugin_info.name.clone(), plugin_info.path.clone());
         plugin.full = Some(ba.full());
         let plugin = Arc::new(plugin);
 
@@ -260,7 +306,24 @@ impl VfoxBackend {
                         .await
                         .wrap_err("Backend exec env method failed")?
                 } else {
-                    vfox.env_keys(&self.pathname, &tv.version).await?
+                    // For local plugins, we need to call the plugin directly with the correct install path
+                    // because vfox.env_keys constructs the path from SDK name which may not match
+                    let plugin = vfox.get_sdk(&self.pathname)?;
+                    use std::collections::BTreeMap as StdBTreeMap;
+                    use vfox::hooks::env_keys::EnvKeysContext;
+                    let sdk_info = vfox::sdk_info::SdkInfo::new(
+                        self.plugin.name.clone(),
+                        tv.version.clone(),
+                        tv.install_path(),
+                    );
+                    let ctx = EnvKeysContext {
+                        args: vec![],
+                        version: tv.version.clone(),
+                        path: tv.install_path(),
+                        sdk_info: StdBTreeMap::from([(sdk_info.name.clone(), sdk_info.clone())]),
+                        main: sdk_info,
+                    };
+                    plugin.env_keys(ctx).await?
                 };
 
                 Ok(env_keys
@@ -301,8 +364,9 @@ mod test {
     #[tokio::test]
     async fn test_vfox_props() {
         let _config = Config::get().await.unwrap();
-        let backend = VfoxBackend::from_arg("vfox:version-fox/vfox-golang".into(), None);
-        assert_eq!(backend.pathname, "vfox-version-fox-vfox-golang");
+        let backend = VfoxBackend::from_arg("vfox:version-fox/vfox-golang".into(), None).await;
+        // pathname is the normalized plugin name in kebab-case
+        assert_eq!(backend.pathname, "version-fox-vfox-golang");
         assert_eq!(
             backend.plugin.full,
             Some("vfox:version-fox/vfox-golang".to_string())
