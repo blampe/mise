@@ -2,7 +2,7 @@
 ///
 /// This module provides the single source of truth for plugin name normalization.
 /// After normalization, code should ONLY use normalized names (no prefixes).
-/// 
+///
 /// Normalize a plugin name by stripping type prefixes.
 ///
 /// This is the ONLY place names should be normalized. After normalization,
