@@ -113,7 +113,7 @@ impl Config {
 
     #[async_backtrace::framed]
     pub async fn load() -> Result<Arc<Self>> {
-        backend::load_tools().await?;
+        // PHASE 2: Load config files early to identify plugins before backend loading
         let idiomatic_files = measure!("config::load idiomatic_files", {
             load_idiomatic_files().await
         });
@@ -129,6 +129,130 @@ impl Config {
         let config_files = measure!("config::load config_files", {
             load_all_config_files(&config_paths, &idiomatic_files).await?
         });
+
+        // PHASE 2: Extract plugins from config and register them in install_state
+        // Note: We don't call install_state::init() here - backend::load_tools() will do it
+        // But we need to ensure the INSTALL_STATE_PLUGINS map is initialized first
+        let config_plugins = measure!("config::load plugins_early", {
+            load_plugins(&config_files)?
+        });
+
+        let mut resolution_tasks = JoinSet::new();
+        measure!("config::load register_plugins", {
+            for (plugin, location) in &config_plugins {
+                // Strip plugin type prefix
+                let plugin_name = plugin
+                    .strip_prefix("vfox:")
+                    .or_else(|| plugin.strip_prefix("vfox-backend:"))
+                    .or_else(|| plugin.strip_prefix("asdf:"))
+                    .unwrap_or(plugin);
+                let normalized = normalize_plugin_name(plugin_name);
+
+                // Register plugin ref (creates OnceCell entry)
+                install_state::register_plugin_ref(normalized.to_string());
+
+                // Spawn resolution task
+                let location = location.clone();
+                let normalized_clone = normalized.to_string();
+                let plugin_clone = plugin.clone();
+                resolution_tasks.spawn(async move {
+                    match (async {
+                        match &location {
+                            PluginLocation::Remote(url) => {
+                                // Determine plugin type from prefix or URL
+                                let (mut plugin_type, has_explicit_prefix) =
+                                    match plugin_clone.as_str() {
+                                        p if p.starts_with("vfox:") => (PluginType::Vfox, true),
+                                        p if p.starts_with("vfox-backend:") => {
+                                            (PluginType::VfoxBackend, true)
+                                        }
+                                        p if p.starts_with("asdf:") => (PluginType::Asdf, true),
+                                        _ => (PluginType::Asdf, false),
+                                    };
+                                // Backward compatibility for vfox plugins
+                                if !has_explicit_prefix && url.contains("vfox-") {
+                                    plugin_type = PluginType::Vfox;
+                                }
+
+                                let path = dirs::PLUGINS.join(normalized_clone.to_kebab_case());
+                                install_state::resolve_plugin(
+                                    &normalized_clone,
+                                    install_state::PluginInfo {
+                                        name: normalized_clone.clone(),
+                                        plugin_type,
+                                        path,
+                                    },
+                                )
+                                .await
+                            }
+                            PluginLocation::Local(path) => {
+                                // Fail early: Local plugins must exist
+                                if !path.exists() {
+                                    return Err(eyre::eyre!(
+                                        "Local plugin path does not exist: {}",
+                                        path.display()
+                                    ));
+                                }
+
+                                // Determine plugin type from prefix or auto-detect
+                                let plugin_type = match plugin_clone.as_str() {
+                                    p if p.starts_with("vfox:") => PluginType::Vfox,
+                                    p if p.starts_with("vfox-backend:") => PluginType::VfoxBackend,
+                                    p if p.starts_with("asdf:") => PluginType::Asdf,
+                                    _ => {
+                                        // Auto-detect based on path contents
+                                        install_state::detect_plugin_type(path)?
+                                    }
+                                };
+
+                                install_state::resolve_plugin(
+                                    &normalized_clone,
+                                    install_state::PluginInfo {
+                                        name: normalized_clone.clone(),
+                                        plugin_type,
+                                        path: path.clone(),
+                                    },
+                                )
+                                .await
+                            }
+                        }
+                    })
+                    .await
+                    {
+                        Ok(_) => {
+                            trace!("Plugin '{}' resolved successfully", normalized_clone);
+                        }
+                        Err(e) => {
+                            error!("Failed to resolve plugin '{}': {:#}", normalized_clone, e);
+                            // OnceCell remains uninitialized, backend creation will fail early
+                        }
+                    }
+                });
+            }
+        });
+
+        // Wait for all plugin resolution tasks to complete
+        measure!("config::load await_plugin_resolution", {
+            let mut resolved_count = 0;
+            while resolution_tasks.join_next().await.is_some() {
+                resolved_count += 1;
+            }
+            debug!("Resolved {} plugins from config", resolved_count);
+        });
+
+        // Clear backend cache so load_tools() reloads with newly registered plugins
+        if !config_plugins.is_empty() {
+            debug!(
+                "Clearing backend cache before load_tools() due to {} config plugins",
+                config_plugins.len()
+            );
+            backend::clear_cache();
+        }
+
+        // NOW load backends (they can await plugin resolution)
+        debug!("About to call backend::load_tools()");
+        backend::load_tools().await?;
+        debug!("backend::load_tools() completed");
 
         let mut config = Self {
             tera_ctx: BASE_CONTEXT.clone(),
@@ -183,7 +307,7 @@ impl Config {
         config.vars = vars;
         config.aliases = load_aliases(&config.config_files)?;
         config.project_root = get_project_root(&config.config_files);
-        config.plugins = load_plugins(&config.config_files)?;
+        config.plugins = config_plugins;
         measure!("config::load validate", {
             config.validate()?;
         });
@@ -207,73 +331,8 @@ impl Config {
 
         time!("load done");
 
-        measure!("config::load install_state", {
-            for (plugin, location) in &config.plugins {
-                // check plugin type, fallback to asdf
-                let plugin_name = plugin
-                    .strip_prefix("vfox:")
-                    .or_else(|| plugin.strip_prefix("vfox-backend:"))
-                    .or_else(|| plugin.strip_prefix("asdf:"))
-                    .unwrap_or(plugin);
-
-                match location {
-                    PluginLocation::Remote(url) => {
-                        // check plugin type, fallback to asdf
-                        let (mut plugin_type, has_explicit_prefix) = match plugin.as_str() {
-                            p if p.starts_with("vfox:") => (PluginType::Vfox, true),
-                            p if p.starts_with("vfox-backend:") => (PluginType::VfoxBackend, true),
-                            p if p.starts_with("asdf:") => (PluginType::Asdf, true),
-                            _ => (PluginType::Asdf, false),
-                        };
-                        // keep backward compatibility for vfox plugins, but only if no explicit prefix
-                        if !has_explicit_prefix && url.contains("vfox-") {
-                            plugin_type = PluginType::Vfox;
-                        }
-
-                        install_state::add_plugin(install_state::PluginInfo {
-                            name: plugin_name.to_string(),
-                            plugin_type,
-                            path: dirs::PLUGINS.join(plugin_name.to_kebab_case()),
-                        })
-                        .await?;
-                    }
-                    PluginLocation::Local(path) => {
-                        // Detect plugin type with prefix support
-                        let plugin_type = match plugin.as_str() {
-                            p if p.starts_with("vfox:") => PluginType::Vfox,
-                            p if p.starts_with("vfox-backend:") => PluginType::VfoxBackend,
-                            p if p.starts_with("asdf:") => PluginType::Asdf,
-                            _ => {
-                                // Auto-detect based on path contents
-                                install_state::detect_plugin_type(path)?
-                            }
-                        };
-
-                        install_state::add_plugin(install_state::PluginInfo {
-                            name: plugin_name.to_string(),
-                            plugin_type,
-                            path: path.clone(),
-                        })
-                        .await?;
-                    }
-                }
-            }
-        });
-
-        measure!("config::load remove_aliased_tools", {
-            for short in config
-                .all_aliases
-                .iter()
-                .filter(|(_, a)| a.backend.is_some())
-                .map(|(s, _)| s)
-                .chain(config.plugins.keys())
-            {
-                // we need to remove aliased tools so they get re-added with updated "full" values
-                // backend cache uses normalized keys, so just remove by short name
-                let normalized = normalize_plugin_name(short);
-                backend::remove(normalized);
-            }
-        });
+        // PHASE 2 & 5: Plugin registration now happens earlier, before backend::load_tools()
+        // No need to invalidate backend cache - lazy resolution ensures backends always get latest info
 
         let config = Arc::new(config);
         *_CONFIG.write().unwrap() = Some(config.clone());

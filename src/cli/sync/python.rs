@@ -37,7 +37,7 @@ impl SyncPython {
     }
 
     async fn pyenv(&self) -> Result<()> {
-        let python = backend::get(&"python".into()).unwrap();
+        let python = backend::get(&"python".into()).await.unwrap();
 
         let pyenv_versions_path = PYENV_ROOT.join("versions");
         let installed_python_versions_path = dirs::INSTALLS.join("python");
@@ -59,7 +59,7 @@ impl SyncPython {
     }
 
     async fn uv(&self) -> Result<()> {
-        let python = backend::get(&"python".into()).unwrap();
+        let python = backend::get(&"python".into()).await.unwrap();
         let uv_versions_path = &*env::UV_PYTHON_INSTALL_DIR;
         let installed_python_versions_path = dirs::INSTALLS.join("python");
 

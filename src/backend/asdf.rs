@@ -42,41 +42,30 @@ pub struct AsdfBackend {
 }
 
 impl AsdfBackend {
-    pub fn from_arg(ba: BackendArg) -> Self {
+    pub async fn from_arg(ba: BackendArg) -> Self {
         let name = ba.tool_name.clone();
         let normalized = normalize_plugin_name(&ba.short);
 
-        // Simple lookup - plugin is already resolved
-        let plugin_info = install_state::get_plugin_info(normalized).unwrap_or_else(|| {
-            // Fallback: check Config for local plugin definitions
-            if crate::config::is_loaded() {
-                let config = crate::config::Config::get_();
-                if let Some(location) = config.get_plugin_location(normalized) {
-                    match location {
-                        crate::plugins::PluginLocation::Local(path) => {
-                            // Detect plugin type from local path
-                            let plugin_type = install_state::detect_plugin_type(&path)
-                                .unwrap_or(PluginType::Asdf);
-                            return install_state::PluginInfo {
-                                name: normalized.to_string(),
-                                plugin_type,
-                                path: path.clone(),
-                            };
-                        }
-                        crate::plugins::PluginLocation::Remote(_) => {
-                            // Remote plugins use standard path
-                        }
+        // PHASE 3 & 4: Try sync first (fast path for already-resolved plugins), then await
+        let plugin_info = if let Some(info) = install_state::get_plugin_info_sync(normalized) {
+            info
+        } else {
+            // Await resolution (slow path) - plugins were registered in Phase 2
+            install_state::get_plugin_info(normalized)
+                .await
+                .unwrap_or_else(|| {
+                    // Final fallback: use standard path for truly unknown plugins
+                    warn!(
+                        "Plugin '{}' not found in registry, using default path",
+                        normalized
+                    );
+                    install_state::PluginInfo {
+                        name: normalized.to_string(),
+                        plugin_type: PluginType::Asdf,
+                        path: dirs::PLUGINS.join(normalized.to_kebab_case()),
                     }
-                }
-            }
-
-            // Final fallback: use standard path for unregistered plugins
-            install_state::PluginInfo {
-                name: normalized.to_string(),
-                plugin_type: PluginType::Asdf,
-                path: dirs::PLUGINS.join(normalized.to_kebab_case()),
-            }
-        });
+                })
+        };
 
         let plugin_path = plugin_info.path.clone();
         let plugin = AsdfPlugin::new(plugin_info.name, plugin_info.path);
@@ -467,7 +456,7 @@ mod tests {
     #[tokio::test]
     async fn test_debug() {
         let _config = Config::get().await.unwrap();
-        let plugin = AsdfBackend::from_arg("dummy".into());
+        let plugin = AsdfBackend::from_arg("dummy".into()).await;
         assert!(format!("{plugin:?}").starts_with("AsdfPlugin { name: \"dummy\""));
     }
 }

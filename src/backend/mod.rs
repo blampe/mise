@@ -89,20 +89,48 @@ pub async fn load_tools() -> Result<Arc<BackendMap>> {
     let core_tools = CORE_PLUGINS.values().cloned().collect::<Vec<ABackend>>();
     let mut tools = core_tools;
     // add tools with idiomatic files so they get parsed even if no versions are installed
-    tools.extend(
-        REGISTRY
-            .values()
-            .filter(|rt| !rt.idiomatic_files.is_empty() && rt.is_supported_os())
-            .filter_map(|rt| arg_to_backend(rt.short.into())),
-    );
+    let registry_backends = REGISTRY
+        .values()
+        .filter(|rt| !rt.idiomatic_files.is_empty() && rt.is_supported_os())
+        .map(|rt| rt.short.into())
+        .collect::<Vec<BackendArg>>();
+    for ba in registry_backends {
+        if let Some(backend) = arg_to_backend(ba).await {
+            tools.push(backend);
+        }
+    }
     time!("load_tools core");
-    tools.extend(
-        install_state::list_tools()
-            .values()
-            .filter(|ist| ist.full.is_some())
-            .flat_map(|ist| arg_to_backend(ist.clone().into())),
-    );
+    let install_state_backends = install_state::list_tools()
+        .values()
+        .filter(|ist| ist.full.is_some())
+        .map(|ist| ist.clone().into())
+        .collect::<Vec<BackendArg>>();
+    for ba in install_state_backends {
+        if let Some(backend) = arg_to_backend(ba).await {
+            tools.push(backend);
+        }
+    }
     time!("load_tools install_state");
+
+    // Also load backends for registered plugins (from config [plugins] section)
+    let plugin_list = install_state::list_plugins();
+    debug!(
+        "Loading backends for {} registered plugins",
+        plugin_list.len()
+    );
+    let plugin_backends = plugin_list.into_keys().map(|name| {
+        debug!("Creating backend for plugin: {}", name);
+        BackendArg::from(name)
+    });
+
+    for ba in plugin_backends {
+        if let Some(backend) = arg_to_backend(ba).await {
+            debug!("Successfully created backend: {}", backend.id());
+            tools.push(backend);
+        }
+    }
+    time!("load_tools plugins");
+
     tools.retain(|backend| {
         tool_enabled(
             &Settings::get().enable_tools(),
@@ -137,15 +165,32 @@ pub fn list() -> BackendList {
         .collect()
 }
 
-pub fn get(ba: &BackendArg) -> Option<ABackend> {
+/// Get a backend from the cache only (synchronous, does not create new backends)
+pub fn get_cached(ba: &BackendArg) -> Option<ABackend> {
+    let normalized = plugins::names::normalize_plugin_name(&ba.short);
+    let tools = TOOLS.lock().unwrap();
+    let tools_ = tools.as_ref().unwrap();
+    tools_.get(normalized).cloned()
+}
+
+pub async fn get(ba: &BackendArg) -> Option<ABackend> {
     // Normalize upfront - cache uses normalized keys consistently
     let normalized = plugins::names::normalize_plugin_name(&ba.short);
 
-    let mut tools = TOOLS.lock().unwrap();
-    let tools_ = tools.as_ref().unwrap();
-    if let Some(backend) = tools_.get(normalized) {
-        Some(backend.clone())
-    } else if let Some(backend) = arg_to_backend(ba.clone()) {
+    // First, check if it's in the cache
+    {
+        let tools = TOOLS.lock().unwrap();
+        let tools_ = tools.as_ref().unwrap();
+        if let Some(backend) = tools_.get(normalized) {
+            return Some(backend.clone());
+        }
+    } // Release lock before awaiting
+
+    // Not in cache, try to create it
+    if let Some(backend) = arg_to_backend(ba.clone()).await {
+        // Insert into cache
+        let mut tools = TOOLS.lock().unwrap();
+        let tools_ = tools.as_ref().unwrap();
         let mut tools_ = tools_.deref().clone();
         tools_.insert(normalized.to_string(), backend.clone());
         *tools = Some(Arc::new(tools_));
@@ -155,14 +200,11 @@ pub fn get(ba: &BackendArg) -> Option<ABackend> {
     }
 }
 
-pub fn remove(short: &str) {
-    let mut tools = TOOLS.lock().unwrap();
-    let mut tools_ = tools.as_ref().unwrap().deref().clone();
-    tools_.remove(short);
-    *tools = Some(Arc::new(tools_));
+pub fn clear_cache() {
+    *TOOLS.lock().unwrap() = None;
 }
 
-pub fn arg_to_backend(ba: BackendArg) -> Option<ABackend> {
+pub async fn arg_to_backend(ba: BackendArg) -> Option<ABackend> {
     match ba.backend_type() {
         BackendType::Core => {
             CORE_PLUGINS
@@ -176,7 +218,7 @@ pub fn arg_to_backend(ba: BackendArg) -> Option<ABackend> {
                 .cloned()
         }
         BackendType::Aqua => Some(Arc::new(aqua::AquaBackend::from_arg(ba))),
-        BackendType::Asdf => Some(Arc::new(asdf::AsdfBackend::from_arg(ba))),
+        BackendType::Asdf => Some(Arc::new(asdf::AsdfBackend::from_arg(ba).await)),
         BackendType::Cargo => Some(Arc::new(cargo::CargoBackend::from_arg(ba))),
         BackendType::Conda => Some(Arc::new(conda::CondaBackend::from_arg(ba))),
         BackendType::Dotnet => Some(Arc::new(dotnet::DotnetBackend::from_arg(ba))),
@@ -189,11 +231,10 @@ pub fn arg_to_backend(ba: BackendArg) -> Option<ABackend> {
         BackendType::Spm => Some(Arc::new(spm::SPMBackend::from_arg(ba))),
         BackendType::Http => Some(Arc::new(http::HttpBackend::from_arg(ba))),
         BackendType::Ubi => Some(Arc::new(ubi::UbiBackend::from_arg(ba))),
-        BackendType::Vfox => Some(Arc::new(vfox::VfoxBackend::from_arg(ba, None))),
-        BackendType::VfoxBackend(plugin_name) => Some(Arc::new(vfox::VfoxBackend::from_arg(
-            ba,
-            Some(plugin_name.to_string()),
-        ))),
+        BackendType::Vfox => Some(Arc::new(vfox::VfoxBackend::from_arg(ba, None).await)),
+        BackendType::VfoxBackend(plugin_name) => Some(Arc::new(
+            vfox::VfoxBackend::from_arg(ba, Some(plugin_name.to_string())).await,
+        )),
         BackendType::Unknown => None,
     }
 }
@@ -554,7 +595,7 @@ pub trait Backend: Debug + Send + Sync {
 
         if tv.install_path().starts_with(*dirs::INSTALLS) {
             // this will be false only for `install-into`
-            install_state::write_backend_meta(self.ba())?;
+            install_state::write_backend_meta(self.ba(), &tv.install_path())?;
         }
 
         self.cleanup_install_dirs(&tv);

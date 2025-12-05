@@ -204,7 +204,7 @@ impl VfoxBackend {
             .ok_or_else(|| eyre::eyre!("VfoxBackend requires a tool name (plugin:tool format)"))
     }
 
-    pub fn from_arg(ba: BackendArg, backend_plugin_name: Option<String>) -> Self {
+    pub async fn from_arg(ba: BackendArg, backend_plugin_name: Option<String>) -> Self {
         let normalized = normalize_plugin_name(&ba.short);
 
         // Determine pathname for vfox SDK lookups
@@ -213,41 +213,30 @@ impl VfoxBackend {
             None => normalized.to_kebab_case(),
         };
 
-        // Simple lookup - plugin is already resolved
-        let plugin_info = install_state::get_plugin_info(normalized).unwrap_or_else(|| {
-            // Fallback: check Config for local plugin definitions
-            if crate::config::is_loaded() {
-                let config = crate::config::Config::get_();
-                if let Some(location) = config.get_plugin_location(normalized) {
-                    match location {
-                        crate::plugins::PluginLocation::Local(path) => {
-                            // Detect plugin type from local path
-                            let plugin_type = install_state::detect_plugin_type(&path)
-                                .unwrap_or(PluginType::Vfox);
-                            return install_state::PluginInfo {
-                                name: normalized.to_string(),
-                                plugin_type,
-                                path: path.clone(),
-                            };
-                        }
-                        crate::plugins::PluginLocation::Remote(_) => {
-                            // Remote plugins use standard path
-                        }
+        // PHASE 3 & 4: Try sync first (fast path for already-resolved plugins), then await
+        let plugin_info = if let Some(info) = install_state::get_plugin_info_sync(normalized) {
+            info
+        } else {
+            // Await resolution (slow path) - plugins were registered in Phase 2
+            install_state::get_plugin_info(normalized)
+                .await
+                .unwrap_or_else(|| {
+                    // Final fallback: use standard path for truly unknown plugins
+                    warn!(
+                        "Plugin '{}' not found in registry, using default path",
+                        normalized
+                    );
+                    install_state::PluginInfo {
+                        name: normalized.to_string(),
+                        plugin_type: if backend_plugin_name.is_some() {
+                            PluginType::VfoxBackend
+                        } else {
+                            PluginType::Vfox
+                        },
+                        path: dirs::PLUGINS.join(pathname.to_kebab_case()),
                     }
-                }
-            }
-
-            // Final fallback: use standard path for unregistered plugins
-            install_state::PluginInfo {
-                name: normalized.to_string(),
-                plugin_type: if backend_plugin_name.is_some() {
-                    PluginType::VfoxBackend
-                } else {
-                    PluginType::Vfox
-                },
-                path: dirs::PLUGINS.join(pathname.to_kebab_case()),
-            }
-        });
+                })
+        };
 
         // For local plugins, pathname should be the directory name for finding hooks
         // For remote plugins, use the normalized kebab-case name
@@ -375,7 +364,7 @@ mod test {
     #[tokio::test]
     async fn test_vfox_props() {
         let _config = Config::get().await.unwrap();
-        let backend = VfoxBackend::from_arg("vfox:version-fox/vfox-golang".into(), None);
+        let backend = VfoxBackend::from_arg("vfox:version-fox/vfox-golang".into(), None).await;
         // pathname is the normalized plugin name in kebab-case
         assert_eq!(backend.pathname, "version-fox-vfox-golang");
         assert_eq!(

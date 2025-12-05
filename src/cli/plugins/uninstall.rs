@@ -58,7 +58,7 @@ impl PluginsUninstall {
                 let pr = mpr.add(&prefix);
                 plugin.uninstall(pr.as_ref()).await?;
                 if self.purge {
-                    let backend = backend::get(&plugin_name.into()).unwrap();
+                    let backend = backend::get(&plugin_name.into()).await.unwrap();
                     backend.purge(pr.as_ref())?;
                 }
                 pr.finish_with_message("uninstalled".into());

@@ -37,7 +37,7 @@ impl SyncRuby {
     }
 
     async fn run_brew(&self) -> Result<()> {
-        let ruby = backend::get(&"ruby".into()).unwrap();
+        let ruby = backend::get(&"ruby".into()).await.unwrap();
 
         let brew_prefix = PathBuf::from(cmd!("brew", "--prefix").read()?).join("opt");
         let installed_versions_path = dirs::INSTALLS.join("ruby");

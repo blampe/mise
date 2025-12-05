@@ -97,7 +97,7 @@ impl BackendArg {
         //     }
         // })?;
         // Ok(backend.clone())
-        if let Some(backend) = backend::get(self) {
+        if let Some(backend) = backend::get_cached(self) {
             Ok(backend)
         } else if let Some((plugin_name, tool_name)) = self.short.split_once(':') {
             // Check if the plugin exists first
